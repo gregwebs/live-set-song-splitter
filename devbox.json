@@ -1,0 +1,15 @@
+{
+  "packages": [
+    "python3",
+    "ripgrep",
+    "python310Packages.pip",
+    "python310Packages.numpy",
+    "python310Packages.scipy",
+    "python310Packages.matplotlib",
+    "python310Packages.librosa",
+    "python310Packages.tqdm"
+  ],
+  "shell": {
+    "init_hook": ". $VENV_DIR/bin/activate"
+  }
+}
