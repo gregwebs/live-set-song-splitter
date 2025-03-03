@@ -22,7 +22,8 @@ def extract_audio_from_mp4(input_file, temp_audio_file):
     )
     return temp_audio_file
 
-def detect_song_boundaries(audio_file, num_songs, min_silence_len=1000, silence_thresh=-40, plot=False):
+def detect_song_boundaries(audio_file, num_songs, min_silence_len=1000, silence_thresh=-40, 
+                           min_song_duration=30000, plot=False):
     """
     Detect song boundaries in a live set using silence detection and energy analysis
     
@@ -36,6 +37,8 @@ def detect_song_boundaries(audio_file, num_songs, min_silence_len=1000, silence_
         Minimum length of silence (in ms) to consider as a potential boundary
     silence_thresh : int
         Threshold (in dB) below which to consider as silence
+    min_song_duration : int
+        Minimum duration of a song in milliseconds (default: 30000 = 30 seconds)
     plot : bool
         Whether to display analysis plots
     
@@ -49,6 +52,7 @@ def detect_song_boundaries(audio_file, num_songs, min_silence_len=1000, silence_
     print("Loading audio file for analysis...")
     # Load using pydub for silence detection
     audio = AudioSegment.from_file(audio_file)
+    total_duration = len(audio)
     
     # Detect silent sections
     print("Detecting silence...")
@@ -76,10 +80,34 @@ def detect_song_boundaries(audio_file, num_songs, min_silence_len=1000, silence_
     window_size = 21
     rms_smooth = signal.savgol_filter(rms, window_size, 3)
     
+    # Trim beginning and end: Find the first and last significant energy points
+    threshold = 0.1 * np.max(rms_smooth)  # 10% of max energy as threshold
+    significant_energy_indices = np.where(rms_smooth > threshold)[0]
+    
+    if len(significant_energy_indices) > 0:
+        first_energy_idx = significant_energy_indices[0]
+        last_energy_idx = significant_energy_indices[-1]
+        
+        # Convert to milliseconds
+        first_energy_time = times_ms[first_energy_idx]
+        last_energy_time = times_ms[last_energy_idx]
+        
+        # Add a small buffer
+        first_energy_time = max(0, first_energy_time - 1000)  # 1 second buffer at start
+        last_energy_time = min(total_duration, last_energy_time + 1000)  # 1 second buffer at end
+    else:
+        # Fallback if no significant energy found
+        first_energy_time = 0
+        last_energy_time = total_duration
+    
     # Find the longest silence sections
     long_silences = []
     for start, end in silence_sections:
         duration = end - start
+        # Skip silences at the very beginning or end
+        if start < first_energy_time + min_silence_len or end > last_energy_time - min_silence_len:
+            continue
+        
         if duration > min_silence_len * 2:  # Consider longer silences as significant
             long_silences.append((start, end, duration))
     
@@ -95,6 +123,11 @@ def detect_song_boundaries(audio_file, num_songs, min_silence_len=1000, silence_
         # If not enough long silences, supplement with energy minima
         # Find local minima in the smoothed RMS
         rel_min_idx = signal.argrelextrema(rms_smooth, np.less, order=50)[0]
+        
+        # Filter out minima at the very beginning or end
+        rel_min_idx = [idx for idx in rel_min_idx if 
+                      times_ms[idx] > first_energy_time + min_silence_len and 
+                      times_ms[idx] < last_energy_time - min_silence_len]
         
         # Convert frame indices to milliseconds
         min_times_ms = [times_ms[idx] for idx in rel_min_idx]
@@ -117,28 +150,89 @@ def detect_song_boundaries(audio_file, num_songs, min_silence_len=1000, silence_
     potential_boundaries.sort(key=lambda x: x[0])
     
     # Now define song segments based on these boundaries
+    # Start from first significant energy point
     song_boundaries = []
-    start_time = 0
+    start_time = first_energy_time
     
     for i, (boundary_start, boundary_end) in enumerate(potential_boundaries):
         # End of current song
         song_end = boundary_start
+        
+        # Skip if the segment would be too short
+        if song_end - start_time < min_song_duration:
+            # If this would make a song too short, skip this boundary
+            continue
+        
         song_boundaries.append((start_time, song_end))
         
         # Start of next song
         start_time = boundary_end
     
-    # Add the last song
-    song_boundaries.append((start_time, len(audio)))
+    # Add the last song if it's long enough
+    if last_energy_time - start_time >= min_song_duration:
+        song_boundaries.append((start_time, last_energy_time))
+    
+    # If we have too few songs, try to split longer segments
+    if len(song_boundaries) < num_songs:
+        print(f"Warning: Only identified {len(song_boundaries)} song boundaries. "
+              f"Expected {num_songs}. Some songs may not have clear boundaries.")
+    
+    # If we have too many songs, merge the shortest ones
+    while len(song_boundaries) > num_songs:
+        # Calculate song durations
+        song_durations = [(end - start, i) for i, (start, end) in enumerate(song_boundaries)]
+        
+        # Sort by duration
+        song_durations.sort(key=lambda x: x[0])
+        
+        # Get index of shortest song
+        shortest_idx = song_durations[0][1]
+        
+        # Merge with adjacent song (prefer the shorter adjacent if possible)
+        if shortest_idx == 0:
+            # Merge with next song
+            next_start, next_end = song_boundaries[1]
+            song_boundaries[0] = (song_boundaries[0][0], next_end)
+            song_boundaries.pop(1)
+        elif shortest_idx == len(song_boundaries) - 1:
+            # Merge with previous song
+            prev_start, prev_end = song_boundaries[shortest_idx - 1]
+            song_boundaries[shortest_idx - 1] = (prev_start, song_boundaries[shortest_idx][1])
+            song_boundaries.pop(shortest_idx)
+        else:
+            # Merge with shorter adjacent
+            prev_duration = song_boundaries[shortest_idx][0] - song_boundaries[shortest_idx-1][0]
+            next_duration = song_boundaries[shortest_idx+1][1] - song_boundaries[shortest_idx+1][0]
+            
+            if prev_duration < next_duration:
+                # Merge with previous
+                song_boundaries[shortest_idx-1] = (song_boundaries[shortest_idx-1][0], 
+                                                 song_boundaries[shortest_idx][1])
+            else:
+                # Merge with next
+                song_boundaries[shortest_idx] = (song_boundaries[shortest_idx][0], 
+                                              song_boundaries[shortest_idx+1][1])
+                song_boundaries.pop(shortest_idx+1)
     
     # Identify talking segments (the boundaries themselves)
-    talking_segments = potential_boundaries
+    talking_segments = []
+    for i in range(len(song_boundaries) - 1):
+        first_song_end = song_boundaries[i][1]
+        second_song_start = song_boundaries[i+1][0]
+        
+        # Only consider it a talking segment if it's significant
+        if second_song_start - first_song_end > min_silence_len * 2:
+            talking_segments.append((first_song_end, second_song_start))
     
     # Plot the RMS and boundaries if requested
     if plot:
-        plt.figure(figsize=(15, 5))
+        fig = plt.figure(figsize=(15, 5))
         plt.plot(times, rms, alpha=0.5, label='RMS Energy')
         plt.plot(times, rms_smooth, label='Smoothed RMS')
+        
+        # Plot trim points
+        plt.axvline(x=first_energy_time/1000, color='purple', linestyle='--', label='First Energy')
+        plt.axvline(x=last_energy_time/1000, color='purple', linestyle='--', label='Last Energy')
         
         # Plot song boundaries
         for start, end in song_boundaries:
@@ -152,8 +246,8 @@ def detect_song_boundaries(audio_file, num_songs, min_silence_len=1000, silence_
         plt.ylabel('RMS Energy')
         plt.title('Audio Energy and Song Boundaries')
         plt.legend()
-        plt.savefig(audio_file + '_audio_energy_and_boundaries.png')
-        plt.show()
+        fig.savefig(audio_file + '+_audio_energy.png')
+        plt.close(fig)
     
     return song_boundaries, talking_segments
 
@@ -195,7 +289,8 @@ def split_mp4(input_file, output_prefix, song_boundaries, talking_segments,
         start_sec = start / 1000
         duration_sec = (end - start) / 1000
         
-        print(f"Extracting song {i+1}: {start_sec:.2f}s to {start_sec + duration_sec:.2f}s")
+        print(f"Extracting song {i+1}: {start_sec:.2f}s to {start_sec + duration_sec:.2f}s " + 
+              f"(Duration: {duration_sec:.2f} seconds)")
         
         try:
             # Use ffmpeg to extract the segment
@@ -214,7 +309,7 @@ def split_mp4(input_file, output_prefix, song_boundaries, talking_segments,
                     .run(quiet=True, overwrite_output=True)
                 )
             
-            print(f"Saved {output_file} - Duration: {duration_sec:.2f} seconds")
+            print(f"Saved {output_file}")
         
         except ffmpeg.Error as e:
             print(f"Error extracting song {i+1}: {e.stderr.decode()}")
@@ -228,7 +323,8 @@ def split_mp4(input_file, output_prefix, song_boundaries, talking_segments,
             start_sec = start / 1000
             duration_sec = (end - start) / 1000
             
-            print(f"Extracting talking segment {i+1}: {start_sec:.2f}s to {start_sec + duration_sec:.2f}s")
+            print(f"Extracting talking segment {i+1}: {start_sec:.2f}s to {start_sec + duration_sec:.2f}s " + 
+                  f"(Duration: {duration_sec:.2f} seconds)")
             
             try:
                 # Use ffmpeg to extract the segment
@@ -247,13 +343,13 @@ def split_mp4(input_file, output_prefix, song_boundaries, talking_segments,
                         .run(quiet=True, overwrite_output=True)
                     )
                 
-                print(f"Saved {output_file} - Duration: {duration_sec:.2f} seconds")
+                print(f"Saved {output_file}")
             
             except ffmpeg.Error as e:
                 print(f"Error extracting talking segment {i+1}: {e.stderr.decode()}")
 
 def process_live_set(input_file, num_songs, output_prefix="", output_format="mp4", 
-                     min_silence_len=1500, silence_thresh=-40, 
+                     min_silence_len=1500, silence_thresh=-40, min_song_duration=30000,
                      include_talking=True, plot=False):
     """
     Process a live set MP4 recording - detect song boundaries and split into individual files
@@ -272,6 +368,8 @@ def process_live_set(input_file, num_songs, output_prefix="", output_format="mp4
         Minimum length of silence (in ms) to consider as a potential boundary
     silence_thresh : int
         Threshold (in dB) below which to consider as silence
+    min_song_duration : int
+        Minimum duration of a song in milliseconds (default: 30000 = 30 seconds)
     include_talking : bool
         Whether to include talking segments as separate files
     plot : bool
@@ -285,7 +383,8 @@ def process_live_set(input_file, num_songs, output_prefix="", output_format="mp4
         
         # Detect song boundaries
         song_boundaries, talking_segments = detect_song_boundaries(
-            temp_audio_file, num_songs, min_silence_len, silence_thresh, plot)
+            temp_audio_file, num_songs, min_silence_len, silence_thresh, 
+            min_song_duration, plot)
         
         # Split the MP4 file
         split_mp4(input_file, output_prefix, song_boundaries, talking_segments, 
@@ -306,6 +405,8 @@ if __name__ == "__main__":
                         help="Minimum silence length (ms) to consider as a boundary")
     parser.add_argument("--silence-threshold", type=int, default=-40, 
                         help="Silence threshold (dB)")
+    parser.add_argument("--min-song-duration", type=int, default=30000,
+                        help="Minimum song duration in milliseconds (default: 30000 = 30 seconds)")
     parser.add_argument("--include-talking", action="store_true", 
                         help="Include talking segments as separate files")
     parser.add_argument("--plot", action="store_true", 
@@ -320,6 +421,7 @@ if __name__ == "__main__":
         args.output_format,
         args.min_silence,
         args.silence_threshold,
+        args.min_song_duration,
         args.include_talking,
         args.plot
     )
