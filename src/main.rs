@@ -7,9 +7,9 @@ const SAMPLE_RATE: u32 = 44100;
 const WINDOW_SIZE: usize = 4096;
 const HOP_SIZE: usize = 1024;
 const MIN_SILENCE_DURATION: f64 = 2.0; // Seconds of silence to detect a gap
-const MAX_GAP_DURATION: f64 = 15.0; // Seconds - gaps longer than this are considered "talking" segments
 const MIN_SONG_DURATION: f64 = 30.0; // Minimum song length in seconds
 const ENERGY_THRESHOLD: f64 = 0.005; // Threshold for audio energy detection (lowered for better sensitivity)
+// const MAX_GAP_DURATION: f64 = 15.0; // Seconds - gaps longer than this are considered "talking" segments
 
 #[derive(Clone, Debug)]
 struct AudioSegment {
@@ -141,7 +141,7 @@ fn analyze_audio(samples: &[f32], expected_songs: usize, total_duration: f64) ->
     println!("Found {} potential silence points", silence_points.len());
     
     // Convert silence points to segments
-    let mut segments = create_segments(silence_points, expected_songs, samples.len(), total_duration);
+    let mut segments = create_segments(silence_points, expected_songs, total_duration);
     
     // If we still don't have enough segments, try force splitting
     if segments.iter().filter(|s| s.is_song).count() < expected_songs {
@@ -232,11 +232,11 @@ fn find_silence_points(energy_profile: &[f64], threshold: f64) -> Vec<usize> {
     silence_points
 }
 
-fn create_segments(silence_points: Vec<usize>, expected_songs: usize, total_samples: usize, total_duration: f64) -> Vec<AudioSegment> {
+fn create_segments(silence_points: Vec<usize>, expected_songs: usize, total_duration: f64) -> Vec<AudioSegment> {
     let mut segments = Vec::new();
     let frames_per_second = SAMPLE_RATE as f64 / HOP_SIZE as f64;
-    let max_gap_frames = (MAX_GAP_DURATION * frames_per_second) as usize;
-    let min_song_frames = (MIN_SONG_DURATION * frames_per_second) as usize;
+    // let max_gap_frames = (MAX_GAP_DURATION * frames_per_second) as usize;
+    // let min_song_frames = (MIN_SONG_DURATION * frames_per_second) as usize;
     
     // If no silence detected, try equal division
     if silence_points.is_empty() {
@@ -403,14 +403,14 @@ fn process_segments(input_file: &str, segments: &[AudioSegment]) -> Result<(), B
         if !segment.is_song {
             // Optionally process gaps
             gap_counter += 1;
-            let output_file = format!("gap_{:02}.m4a", gap_counter);
+            // let output_file = format!("gap_{:02}.m4a", gap_counter);
             
-            println!("Extracting gap {}: {:.2}s to {:.2}s", 
+            println!("ignoring gap {}: {:.2}s to {:.2}s", 
                      gap_counter, 
                      segment.start_time, 
                      segment.end_time);
             
-            extract_segment(input_file, &output_file, segment.start_time, segment.end_time)?;
+            // extract_segment(input_file, &output_file, segment.start_time, segment.end_time)?;
             continue;
         }
         
@@ -432,6 +432,27 @@ fn process_segments(input_file: &str, segments: &[AudioSegment]) -> Result<(), B
 }
 
 fn extract_segment(input_file: &str, output_file: &str, start_time: f64, end_time: f64) -> Result<(), Box<dyn std::error::Error>> {
+    // let duration = end_time - start_time;
+    
+    // Use MP4Box for segment extraction
+    let status = Command::new("MP4Box")
+        .args(&[
+            "-splitx", &format!("{:.3}:{:.3}", start_time, end_time),
+            "-out", output_file,
+            input_file
+        ])
+        .status()?;
+    
+    if !status.success() {
+        return Err(format!("Failed to extract segment to {}", output_file).into());
+    }
+    
+    Ok(())
+}
+
+// This is really slow!
+// Perhaps because it re-encodes the audio?
+fn _extract_segment_ffmpeg(input_file: &str, output_file: &str, start_time: f64, end_time: f64) -> Result<(), Box<dyn std::error::Error>> {
     let status = Command::new("ffmpeg")
         .args(&[
             "-i", input_file,
@@ -439,7 +460,7 @@ fn extract_segment(input_file: &str, output_file: &str, start_time: f64, end_tim
             "-to", &format!("{:.3}", end_time),
             "-c:a", "aac",        // AAC audio codec
             "-b:a", "192k",       // Bitrate
-            // "-vn",                // No video
+            "-vn",                // No video
             "-y",                 // Overwrite output file
             output_file
         ])
