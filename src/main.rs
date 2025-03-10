@@ -598,3 +598,17 @@ fn _extract_segment_ffmpeg(
 // -time [tkID=]DAY/MONTH/YEAR-H:M:S: set movie or track creation time
 // -mtime tkID=DAY/MONTH/YEAR-H:M:S: set media creation time
 // tags: -tags name=value:tag2=value https://wiki.gpac.io/MP4Box/mp4box-other-opts/#tagging-support
+
+// Look for song titles overlayed on the video
+// 1) extracting frames
+// qscale might only work with jpg
+// ffmpeg -skip_frame nokey -i Faye\ Webster：\ Tiny\ Desk\ Concert.mp4 -c:v png -vsync 0 -qscale:v 31 'vout/faye_frame%05d.png'
+// 2) tesseract
+//  usually shows up right at or after the start of song
+// however, sometimes it shows up while they are doing a band introduction instead of the real song.
+
+/*
+ffmpeg -skip_frame nokey -i Faye\ Webster：\ Tiny\ Desk\ Concert.mp4 -c:v png -vsync 0 -qscale:v 31 -vf "scale=400:200,crop=iw/3:ih/5:0:160" 'vout/faye_frame%04d.png'
+tesseract faye_frame0006.png out
+cat out.txt
+*/
