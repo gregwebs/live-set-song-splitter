@@ -655,7 +655,19 @@ fn detect_song_boundaries_from_text(
                         println!("Match found! '{}' matches song '{}' at {}s (frame {})", 
                                 filtered_text, song.title, timestamp, frame_num);
                         
-                        song_start_times.push((song.title.clone(), timestamp));
+                        // Extract additional frames around this timestamp for more accurate boundary detection
+                        let refined_timestamp = refine_song_start_time(input_file, temp_dir, song_title, timestamp)?;
+                        
+                        // Use the refined timestamp if available, otherwise use the original
+                        let final_timestamp = if refined_timestamp > 0.0 && refined_timestamp < timestamp {
+                            println!("Refined start time for '{}': {}s (was {}s)", 
+                                    song_title, refined_timestamp, timestamp);
+                            refined_timestamp
+                        } else {
+                            timestamp
+                        };
+                        
+                        song_start_times.push((song.title.clone(), final_timestamp));
                         break;
                     }
 
@@ -706,6 +718,144 @@ fn detect_song_boundaries_from_text(
     // fs::remove_dir_all(temp_dir)?;
     
     Ok(segments)
+}
+
+fn refine_song_start_time(
+    input_file: &str,
+    temp_dir: &str,
+    song_title: &str,
+    initial_timestamp: f64,
+) -> Result<f64, Box<dyn std::error::Error>> {
+    println!("Refining start time for '{}' (initially at {}s)...", song_title, initial_timestamp);
+    
+    // Define the time window to look before the detected timestamp
+    let look_back_seconds = 20.0;
+    let start_time = if initial_timestamp > look_back_seconds {
+        initial_timestamp - look_back_seconds
+    } else {
+        0.0
+    };
+    
+    // Create a subdirectory for the refined frames
+    let refined_dir = format!("{}/refined_{}", temp_dir, song_title.replace(" ", "_"));
+    if !Path::new(&refined_dir).exists() {
+        fs::create_dir(&refined_dir)?;
+    }
+    
+    // Extract more frequent frames within the time window
+    println!("Extracting additional frames from {}s to {}s...", start_time, initial_timestamp);
+    let status = Command::new("ffmpeg")
+        .args(&[
+            "-ss", &format!("{}", start_time),
+            "-to", &format!("{}", initial_timestamp),
+            "-i", input_file,
+            "-vf", "fps=4,scale=400:200,crop=iw/1.5:ih/5:0:160", // 4 frames per second
+            "-q:v", "2", // High quality
+            &format!("{}/refined_frame_%04d.png", refined_dir),
+        ])
+        .status()?;
+    
+    if !status.success() {
+        println!("Failed to extract refined frames");
+        return Ok(0.0);
+    }
+    
+    // Read the refined frames and analyze them
+    let mut frames = fs::read_dir(&refined_dir)?
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry.path().extension().map_or(false, |ext| ext == "png")
+        })
+        .collect::<Vec<_>>();
+    
+    frames.sort_by(|a, b| a.path().cmp(&b.path()));
+    println!("Analyzing {} refined frames for song title '{}'", frames.len(), song_title);
+    
+    let mut earliest_match = 0.0;
+    let song_title_lower = song_title.to_lowercase();
+    
+    // Process each refined frame
+    let frame_count = frames.len() as f64;
+    for frame_entry in frames {
+        let frame_path = frame_entry.path();
+        let frame_name = frame_path.file_name().unwrap().to_string_lossy();
+        
+        // Extract frame number
+        let frame_num = frame_name
+            .strip_prefix("refined_frame_")
+            .and_then(|s| s.strip_suffix(".png"))
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(0);
+        
+        // Create a temporary output file for tesseract
+        let out_txt = format!("{}/refined_out_{}", refined_dir, frame_num);
+        
+        // Run tesseract OCR on the frame
+        let status = Command::new("tesseract")
+            .args(&[
+                frame_path.to_str().unwrap(),
+                &out_txt,
+                "--psm",
+                "11",
+            ])
+            .stderr(std::process::Stdio::null())
+            .status()?;
+            
+        if !status.success() {
+            continue;
+        }
+        
+        // Read the OCR result
+        let out_txt_path = format!("{}.txt", out_txt);
+        if let Ok(text) = fs::read_to_string(&out_txt_path) {
+            let detected_text = text.trim().to_lowercase();
+            
+            // Skip if empty or too short
+            if detected_text.len() < 4 {
+                continue;
+            }
+            
+            let lines: Vec<&str> = detected_text.lines()
+                .filter(|line| line.trim().len() > 1)
+                .collect();
+                
+            if lines.is_empty() {
+                continue;
+            }
+            
+            // Check if any line contains part of the song title
+            for line in &lines {
+                if line.contains(&song_title_lower) || song_title_lower.contains(line) {
+                    // Calculate approximate timestamp for this frame
+                    // We know start_time and duration, so interpolate based on frame position
+                    let frame_position = frame_num as f64;
+                    let frame_time = start_time + (initial_timestamp - start_time) * (frame_position / frame_count);
+                    
+                    // Get more accurate timestamp if possible
+                    let exact_time = frame_time;
+                    
+                    println!("Earlier match for '{}' at {}s (frame {})", 
+                            song_title, exact_time, frame_num);
+                    
+                    if earliest_match == 0.0 || exact_time < earliest_match {
+                        earliest_match = exact_time;
+                    }
+                    
+                    break;
+                }
+            }
+        }
+    }
+    
+    // Return the earliest match if found, otherwise 0.0
+    if earliest_match > 0.0 {
+        println!("Successfully refined start time for '{}' from {}s to {}s (-{:.2}s)", 
+                song_title, initial_timestamp, earliest_match, initial_timestamp - earliest_match);
+    } else {
+        println!("Could not find earlier boundary for '{}', keeping original timestamp: {}s", 
+                song_title, initial_timestamp);
+    }
+    Ok(earliest_match)
 }
 
 fn get_frame_timestamp(input_file: &str, frame_num: usize) -> Result<f64, Box<dyn std::error::Error>> {
