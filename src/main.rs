@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::env;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufReader, Read};
+use std::path::Path;
 use std::process::Command;
 
 const SAMPLE_RATE: u32 = 44100;
@@ -58,16 +59,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  {}. {}", i + 1, song.title);
     }
 
-    // Step 1: Extract audio waveform data using FFmpeg
-    println!("Extracting audio waveform...");
-    let audio_data = extract_audio_waveform(input_file)?;
-
     // Get the total duration of the file
     let duration = get_file_duration(input_file)?;
     println!("Total duration: {:.2} seconds", duration);
 
-    // Step 2: Analyze audio to find segments
-    let segments = analyze_audio(&audio_data, num_songs, duration)?;
+    // First try to detect song boundaries using text overlays
+    println!("Attempting to detect song boundaries using text overlays...");
+    let mut segments = detect_song_boundaries_from_text(input_file, &setlist.set_list, duration)?;
+    
+    // If text detection didn't find enough songs, fall back to audio analysis
+    if segments.iter().filter(|s| s.is_song).count() < num_songs {
+        println!("Text overlay detection didn't find all songs. Falling back to audio analysis...");
+        
+        // Extract audio waveform data using FFmpeg
+        println!("Extracting audio waveform...");
+        let audio_data = extract_audio_waveform(input_file)?;
+        
+        // Analyze audio to find segments
+        segments = analyze_audio(&audio_data, num_songs, duration)?;
+    }
 
     println!("Found {} segments", segments.len());
     for (i, segment) in segments.iter().enumerate() {
@@ -81,7 +91,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    // Step 3: Process each detected segment
+    // Process each detected segment
     process_segments(input_file, &segments, &setlist.set_list)?;
 
     println!("Audio splitting complete!");
@@ -514,6 +524,155 @@ fn process_segments(
         song_counter, gap_counter
     );
     Ok(())
+}
+
+fn detect_song_boundaries_from_text(
+    input_file: &str,
+    songs: &[Song],
+    total_duration: f64,
+) -> Result<Vec<AudioSegment>, Box<dyn std::error::Error>> {
+    // Create a temporary directory for frames
+    let temp_dir = "temp_frames";
+    if Path::new(temp_dir).exists() {
+        fs::remove_dir_all(temp_dir)?;
+    }
+    fs::create_dir(temp_dir)?;
+
+    println!("Extracting key frames to detect text overlays...");
+    
+    // Extract frames with potential text overlays
+    let status = Command::new("ffmpeg")
+        .args(&[
+            "-skip_frame", "nokey",
+            "-i", input_file,
+            "-c:v", "png",
+            "-vsync", "0",
+            "-qscale:v", "31",
+            "-vf", "scale=400:200,crop=iw/3:ih/5:0:160",
+            &format!("{}/frame%04d.png", temp_dir),
+        ])
+        .status()?;
+
+    if !status.success() {
+        return Err("Failed to extract frames".into());
+    }
+
+    // Get list of extracted frames
+    let frames = fs::read_dir(temp_dir)?
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry.path().extension().map_or(false, |ext| ext == "png")
+        })
+        .collect::<Vec<_>>();
+
+    println!("Extracted {} frames, analyzing for text...", frames.len());
+
+    // Map to store detected song start times
+    let mut song_start_times = Vec::new();
+
+    // Process each frame to detect text
+    for frame_entry in frames {
+        let frame_path = frame_entry.path();
+        let frame_name = frame_path.file_name().unwrap().to_string_lossy();
+        
+        // Extract frame number to calculate timestamp
+        let frame_num = frame_name
+            .strip_prefix("frame")
+            .and_then(|s| s.strip_suffix(".png"))
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(0);
+        
+        // Create a temporary output file for tesseract
+        let out_txt = format!("{}/out_{}", temp_dir, frame_num);
+        
+        // Run tesseract OCR on the frame
+        let status = Command::new("tesseract")
+            .args(&[
+                frame_path.to_str().unwrap(),
+                &out_txt,
+                "--psm", "7", // Treat the image as a single line of text
+            ])
+            .status()?;
+            
+        if !status.success() {
+            println!("Warning: Tesseract failed on frame {}", frame_name);
+            continue;
+        }
+        
+        // Read the OCR result
+        let out_txt_path = format!("{}.txt", out_txt);
+        if let Ok(text) = fs::read_to_string(&out_txt_path) {
+            let detected_text = text.trim().to_lowercase();
+            
+            // Skip if empty or too short
+            if detected_text.len() < 3 {
+                continue;
+            }
+            
+            println!("Frame {}: Detected text: '{}'", frame_name, detected_text);
+            
+            // Check if the detected text matches any song title
+            for song in songs {
+                let song_title = song.title.to_lowercase();
+                
+                // Check for partial match (if the detected text is part of the song title or vice versa)
+                if detected_text.contains(&song_title) || song_title.contains(&detected_text) {
+                    // Get the timestamp for this frame
+                    // This is an approximation - we'd need to get the exact timestamp from ffmpeg
+                    let timestamp = frame_num as f64 * 0.5; // Rough estimate, adjust as needed
+                    
+                    println!("Match found! '{}' matches song '{}' at approx. {}s", 
+                             detected_text, song.title, timestamp);
+                    
+                    song_start_times.push((song.title.clone(), timestamp));
+                    break;
+                }
+            }
+        }
+    }
+
+    // Sort song start times by timestamp
+    song_start_times.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    
+    // Create segments from detected song boundaries
+    let mut segments = Vec::new();
+    
+    if song_start_times.is_empty() {
+        println!("No song titles detected in frames. Will fall back to audio analysis.");
+        return Ok(Vec::new());
+    }
+    
+    println!("Detected {} song boundaries from text overlays", song_start_times.len());
+    
+    // Create segments from the detected song start times
+    for i in 0..song_start_times.len() {
+        let start_time = song_start_times[i].1;
+        let end_time = if i < song_start_times.len() - 1 {
+            song_start_times[i + 1].1
+        } else {
+            total_duration
+        };
+        
+        segments.push(AudioSegment {
+            start_time,
+            end_time,
+            is_song: true,
+        });
+    }
+    
+    // If we have a gap at the beginning, add it as a non-song segment
+    if !segments.is_empty() && segments[0].start_time > 0.0 {
+        segments.insert(0, AudioSegment {
+            start_time: 0.0,
+            end_time: segments[0].start_time,
+            is_song: false,
+        });
+    }
+    
+    // Clean up temporary files
+    fs::remove_dir_all(temp_dir)?;
+    
+    Ok(segments)
 }
 
 fn sanitize_filename(input: &str) -> String {

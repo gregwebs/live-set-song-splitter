@@ -30,6 +30,9 @@ thiserror = "1.0"
 
 ffmpeg-next = "7.1.0"
 
+# File system operations
+tempfile = "3.8"        # For better temporary file handling
+
 # Optional: for more advanced audio processing
 # Note: these are optional and can be added if needed
 # symphonia = { version = "0.5", features = ["mp3", "aac", "isomp4"] }
