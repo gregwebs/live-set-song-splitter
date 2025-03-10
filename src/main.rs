@@ -34,16 +34,21 @@ struct SetList {
 }
 
 #[derive(Debug, Clone)]
+struct FrameInfo {
+    timestamp: f64,
+    is_keyframe: bool,
+}
+
+#[derive(Debug, Clone)]
 struct VideoInfo {
     // Basic information
     duration: f64,
-    #[allow(dead_code)]
     framerate: f64,
     start_time: f64,
     
-    // Keyframe information
-    keyframe_timestamps: Vec<f64>,
-    avg_keyframe_interval: f64,
+    // Frame information
+    frames: Vec<FrameInfo>,
+    keyframe_indices: Vec<usize>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -148,7 +153,7 @@ fn get_video_info(input_file: &str) -> Result<VideoInfo, Box<dyn std::error::Err
         
     // Extract framerate
     let fps_str = info["streams"][0]["r_frame_rate"].as_str().ok_or("Missing framerate")?;
-    let mut fps = 25.0; // Default fallback value
+    let mut fps = 24.0; // Default fallback value
     if let Some((num, den)) = fps_str.split_once('/') {
         if let (Ok(n), Ok(d)) = (num.parse::<f64>(), den.parse::<f64>()) {
             if d > 0.0 {
@@ -160,9 +165,9 @@ fn get_video_info(input_file: &str) -> Result<VideoInfo, Box<dyn std::error::Err
     println!("Video duration: {}s, start time: {}s, framerate: {:.2} fps", 
              duration, start_time, fps);
     
-    // Get keyframe timestamps
-    println!("Extracting keyframe information...");
-    let keyframe_data = Command::new("ffprobe")
+    // Get all frame information in a single pass
+    println!("Extracting all frame information...");
+    let frame_data = Command::new("ffprobe")
         .args(&[
             "-v", "error",
             "-select_streams", "v:0",
@@ -172,42 +177,40 @@ fn get_video_info(input_file: &str) -> Result<VideoInfo, Box<dyn std::error::Err
         ])
         .output()?;
     
-    let keyframe_data_str = String::from_utf8(keyframe_data.stdout)?;
+    let frame_data_str = String::from_utf8(frame_data.stdout)?;
     
-    // Parse keyframe timestamps - format is "pts_time,flags" where flags contains "K" for keyframes
-    let keyframe_timestamps: Vec<f64> = keyframe_data_str
-        .lines()
-        .filter_map(|line| {
-            let parts: Vec<&str> = line.split(',').collect();
-            if parts.len() >= 2 && parts[1].contains('K') {
-                // This is a keyframe, parse the timestamp
-                parts[0].parse::<f64>().ok()
-            } else {
-                None
+    // Parse frame data - format is "pts_time,flags"
+    let mut frames = Vec::new();
+    let mut keyframe_indices = Vec::new();
+    
+    for (i, line) in frame_data_str.lines().enumerate() {
+        let parts: Vec<&str> = line.split(',').collect();
+        if parts.len() >= 2 {
+            if let Ok(timestamp) = parts[0].parse::<f64>() {
+                let is_keyframe = parts[1].contains('K');
+                
+                // Add to frames collection
+                frames.push(FrameInfo {
+                    timestamp,
+                    is_keyframe,
+                });
+                
+                // If it's a keyframe, record its index
+                if is_keyframe {
+                    keyframe_indices.push(i);
+                }
             }
-        })
-        .collect();
+        }
+    }
     
-    println!("Found {} keyframes", keyframe_timestamps.len());
-    
-    // Calculate average keyframe interval
-    let avg_keyframe_interval = if keyframe_timestamps.len() >= 2 {
-        let interval = (keyframe_timestamps[keyframe_timestamps.len() - 1] - keyframe_timestamps[0]) / 
-                      (keyframe_timestamps.len() - 1) as f64;
-        println!("Average keyframe interval: {:.2}s", interval);
-        interval
-    } else {
-        // Default interval is 2 seconds
-        println!("Could not calculate keyframe interval, using default (2s)");
-        2.0
-    };
+    println!("Found {} frames, including {} keyframes", frames.len(), keyframe_indices.len());
     
     Ok(VideoInfo {
         duration,
         framerate: fps,
         start_time,
-        keyframe_timestamps,
-        avg_keyframe_interval,
+        frames,
+        keyframe_indices,
     })
 }
 
@@ -738,7 +741,7 @@ fn detect_song_boundaries_from_text(
                             filtered_text, song.title, timestamp, frame_num);
                     
                     // Extract additional frames around this timestamp for more accurate boundary detection
-                    let refined_timestamp = refine_song_start_time(input_file, temp_dir, &artist_cmp, song_title, timestamp)?;
+                    let refined_timestamp = refine_song_start_time(input_file, temp_dir, &artist_cmp, song_title, timestamp, video_info)?;
                     
                     // Use the refined timestamp if available, otherwise use the original
                     let final_timestamp = if refined_timestamp > 0.0 && refined_timestamp < timestamp {
@@ -843,6 +846,7 @@ fn refine_song_start_time(
     artist: &str,
     song_title: &str,
     initial_timestamp: f64,
+    video_info: &VideoInfo,
 ) -> Result<f64, Box<dyn std::error::Error>> {
     println!("Refining start time for '{}' (initially at {}s)...", song_title, initial_timestamp);
     
@@ -860,15 +864,17 @@ fn refine_song_start_time(
         fs::create_dir(&refined_dir)?;
     }
     
-    // Extract more frequent frames within the time window (4 frames per second)
-    println!("Extracting additional frames from {}s to {}s at 4 fps...", start_time, initial_timestamp);
+    // Extract frames at original video framerate for accuracy
+    let fps = video_info.framerate;
+    println!("Extracting additional frames from {}s to {}s at {:.2} fps (video framerate)...", 
+            start_time, initial_timestamp, fps);
     let status = Command::new("ffmpeg")
         .args(&[
             "-ss", &format!("{}", start_time),
             "-to", &format!("{}", initial_timestamp),
             "-i", input_file,
             "-c:v", "png",
-            "-vf", "fps=4,scale=400:200,crop=iw/1.5:ih/5:0:160", // Exactly 4 frames per second
+            "-vf", &format!("fps={},scale=400:200,crop=iw/1.5:ih/5:0:160", fps), // Use original video framerate
             "-qscale:v", "31",          // Quality setting
             &format!("{}/%d.png", refined_dir), // Sequential numbering starting from 1
         ])
@@ -935,15 +941,17 @@ fn refine_song_start_time(
             // If we see the artist overlay that's good enough.
             // On the initial fade in we might be able to see the artist name but not the song title.
             if overlay || matches_song_title(&lines, song_title, overlay) {
-                // Calculate exact timestamp for this frame
-                // Since we're using fps=4, each frame is exactly 0.25 seconds
-                // Frame numbers start at 1, so frame 1 = start_time, frame 2 = start_time + 0.25, etc.
-                let fps = 4.0; // Matches the fps value in the ffmpeg command
-                let frame_time = start_time + ((frame_num - 1) as f64 / fps);
+                // Find the exact timestamp for this frame using the frame number and video framerate
+                // We extract frames at the video's framerate starting from start_time
+                let fps = video_info.framerate; // Use the actual video framerate
+                let approx_frame_time = start_time + ((frame_num - 1) as f64 / fps);
                 
-                println!("Earlier match for '{}' at {}s (frame {}/{}, +{}s from start)", 
+                // Find the closest actual frame timestamp from the video
+                let frame_time = find_nearest_frame_timestamp(approx_frame_time, &video_info.frames);
+                
+                println!("Earlier match for '{}' at {}s (frame {}/{}, approx: {}s, diff: {:.3}s)", 
                         song_title, frame_time, frame_num, frame_count, 
-                        (frame_num - 1) as f64 / fps);
+                        approx_frame_time, (frame_time - approx_frame_time).abs());
                 
                 if earliest_match == 0.0 || frame_time < earliest_match {
                     earliest_match = frame_time;
@@ -963,26 +971,61 @@ fn refine_song_start_time(
     Ok(earliest_match)
 }
 
-fn get_frame_timestamp(video_info: &VideoInfo, frame_num: usize) -> f64 {
-    // If we have enough keyframes, map the frame number to the correct keyframe
-    if !video_info.keyframe_timestamps.is_empty() {
-        // Frame numbers are 1-indexed in our extraction, but array is 0-indexed
-        let index = if frame_num > 0 { frame_num - 1 } else { 0 };
-        
-        if index < video_info.keyframe_timestamps.len() {
-            println!("Using direct keyframe timestamp: {}s for frame {}", 
-                    video_info.keyframe_timestamps[index], frame_num);
-            return video_info.keyframe_timestamps[index];
-        } else {
-            println!("Frame number {} exceeds available keyframes {}, using estimation", 
-                    frame_num, video_info.keyframe_timestamps.len());
+fn find_nearest_frame_timestamp(target_time: f64, frames: &[FrameInfo]) -> f64 {
+    if frames.is_empty() {
+        return target_time; // Return the target time if no frames available
+    }
+    
+    // Find the timestamp closest to the target time
+    let mut closest_time = frames[0].timestamp;
+    let mut min_diff = (frames[0].timestamp - target_time).abs();
+    let mut is_keyframe = frames[0].is_keyframe;
+    
+    for frame in frames {
+        let diff = (frame.timestamp - target_time).abs();
+        if diff < min_diff {
+            min_diff = diff;
+            closest_time = frame.timestamp;
+            is_keyframe = frame.is_keyframe;
         }
     }
     
-    // Fallback - estimate timestamp based on keyframe interval
-    let estimated_timestamp = video_info.start_time + (frame_num as f64 * video_info.avg_keyframe_interval);
-    println!("Estimated timestamp for frame {}: {:.2}s", frame_num, estimated_timestamp);
+    println!("Found frame timestamp {}s (closest to target {}s, diff: {:.3}s, keyframe: {})", 
+             closest_time, target_time, min_diff, is_keyframe);
+    closest_time
+}
+
+fn get_frame_timestamp(video_info: &VideoInfo, frame_num: usize) -> f64 {
+    // If we have keyframe indices, map the frame number to the correct keyframe
+    if !video_info.keyframe_indices.is_empty() && !video_info.frames.is_empty() {
+        // Frame numbers are 1-indexed in our extraction, but array is 0-indexed
+        let index = if frame_num > 0 { frame_num - 1 } else { 0 };
+        
+        // Check if this index happens to be in our keyframes list
+        if index < video_info.keyframe_indices.len() {
+            let index = video_info.keyframe_indices[index];
+            // If it's a direct frame match, return that timestamp
+            let timestamp = video_info.frames[index].timestamp;
+            let is_keyframe = video_info.frames[index].is_keyframe;
+            
+            println!("Using direct frame timestamp: {}s for frame {} (keyframe: {})", 
+                    timestamp, frame_num, is_keyframe);
+            return timestamp;
+        }
+    }
     
+    // Fallback - estimate timestamp based on frame interval
+    let estimated_timestamp = video_info.start_time + (frame_num as f64 / video_info.framerate);
+    
+    // Find the closest actual frame timestamp
+    if !video_info.frames.is_empty() {
+        let exact_time = find_nearest_frame_timestamp(estimated_timestamp, &video_info.frames);
+        println!("Using closest frame timestamp for frame {}: {}s (estimate: {:.2}s)", 
+                frame_num, exact_time, estimated_timestamp);
+        return exact_time;
+    }
+    
+    println!("Estimated timestamp for frame {}: {:.2}s", frame_num, estimated_timestamp);
     estimated_timestamp
 }
 
