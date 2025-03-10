@@ -21,7 +21,7 @@ struct AudioSegment {
     is_song: bool,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct Song {
     title: String,
 }
@@ -65,7 +65,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // First try to detect song boundaries using text overlays
     println!("Attempting to detect song boundaries using text overlays...");
-    let mut segments = detect_song_boundaries_from_text(input_file, &setlist.set_list, duration)?;
+    let mut segments = detect_song_boundaries_from_text(input_file, &setlist.artist, &setlist.set_list, duration)?;
+    for segment in &segments {
+        println!("Segment: {:?}", segment);
+    }
     
     // If text detection didn't find enough songs, fall back to audio analysis
     if segments.iter().filter(|s| s.is_song).count() < num_songs {
@@ -528,15 +531,22 @@ fn process_segments(
 
 fn detect_song_boundaries_from_text(
     input_file: &str,
+    artist: &str,
     songs: &[Song],
     total_duration: f64,
 ) -> Result<Vec<AudioSegment>, Box<dyn std::error::Error>> {
+    let artist_cmp = artist.to_lowercase();
     // Create a temporary directory for frames
     let temp_dir = "temp_frames";
     if Path::new(temp_dir).exists() {
         fs::remove_dir_all(temp_dir)?;
     }
     fs::create_dir(temp_dir)?;
+
+    let mut sorted_songs: Vec<Song> = songs.to_vec();
+    println!("songs: {:?}", songs);
+    // sorted_songs.clone_from_slice(songs);
+    sorted_songs.sort_by(|a, b| a.title.len().partial_cmp(&b.title.len()).unwrap().reverse());
 
     println!("Extracting key frames to detect text overlays...");
     
@@ -548,7 +558,7 @@ fn detect_song_boundaries_from_text(
             "-c:v", "png",
             "-vsync", "0",
             "-qscale:v", "31",
-            "-vf", "scale=400:200,crop=iw/3:ih/5:0:160",
+            "-vf", "scale=400:200,crop=iw/1.5:ih/5:0:160",
             &format!("{}/frame%04d.png", temp_dir),
         ])
         .status()?;
@@ -558,7 +568,7 @@ fn detect_song_boundaries_from_text(
     }
 
     // Get list of extracted frames
-    let frames = fs::read_dir(temp_dir)?
+    let mut frames = fs::read_dir(temp_dir)?
         .filter_map(Result::ok)
         .filter(|entry| {
             entry.path().extension().map_or(false, |ext| ext == "png")
@@ -571,6 +581,7 @@ fn detect_song_boundaries_from_text(
     let mut song_start_times = Vec::new();
 
     // Process each frame to detect text
+    frames.sort_by(|a, b| a.path().cmp(&b.path()));
     for frame_entry in frames {
         let frame_path = frame_entry.path();
         let frame_name = frame_path.file_name().unwrap().to_string_lossy();
@@ -590,8 +601,10 @@ fn detect_song_boundaries_from_text(
             .args(&[
                 frame_path.to_str().unwrap(),
                 &out_txt,
-                "--psm", "7", // Treat the image as a single line of text
+                "--psm",
+                "11",
             ])
+            .stderr(std::process::Stdio::null()) // Silence stderr output
             .status()?;
             
         if !status.success() {
@@ -602,21 +615,34 @@ fn detect_song_boundaries_from_text(
         // Read the OCR result
         let out_txt_path = format!("{}.txt", out_txt);
         if let Ok(text) = fs::read_to_string(&out_txt_path) {
-            let detected_text = text.trim().to_lowercase();
+            let mut detected_text = text.trim().to_lowercase();
             
             // Skip if empty or too short
-            if detected_text.len() < 3 {
+            if detected_text.len() < 4 {
                 continue;
             }
-            
-            println!("Frame {}: Detected text: '{}'", frame_name, detected_text);
+
+            let lines: Vec<&str>= detected_text.lines().filter(|line|
+                line.trim().len() > 1
+            ).collect();
+            if lines.len() == 0 {
+                continue;
+            }
+            let overlay = lines[0].trim() == artist_cmp;
+            if overlay {
+                detected_text = lines[1..].to_vec().join("\n");
+                println!("Frame {}: Detected overlay: '{}'", frame_name, detected_text);
+            } else {
+                detected_text = lines.to_vec().join("\n");
+                println!("Frame {}: Detected text: '{}'", frame_name, detected_text);
+            }
             
             // Check if the detected text matches any song title
-            for song in songs {
+            for song in &sorted_songs {
                 let song_title = song.title.to_lowercase();
                 
                 // Check for partial match (if the detected text is part of the song title or vice versa)
-                if detected_text.contains(&song_title) || song_title.contains(&detected_text) {
+                if detected_text.contains(&song_title) || (overlay && song_title.contains(&detected_text)) {
                     // Get the timestamp for this frame
                     // This is an approximation - we'd need to get the exact timestamp from ffmpeg
                     let timestamp = frame_num as f64 * 0.5; // Rough estimate, adjust as needed
@@ -670,7 +696,7 @@ fn detect_song_boundaries_from_text(
     }
     
     // Clean up temporary files
-    fs::remove_dir_all(temp_dir)?;
+    // fs::remove_dir_all(temp_dir)?;
     
     Ok(segments)
 }
