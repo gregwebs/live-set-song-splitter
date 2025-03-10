@@ -33,6 +33,19 @@ struct SetList {
     set_list: Vec<Song>,
 }
 
+#[derive(Debug, Clone)]
+struct VideoInfo {
+    // Basic information
+    duration: f64,
+    #[allow(dead_code)]
+    framerate: f64,
+    start_time: f64,
+    
+    // Keyframe information
+    keyframe_timestamps: Vec<f64>,
+    avg_keyframe_interval: f64,
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     if args.len() < 3 {
@@ -59,13 +72,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  {}. {}", i + 1, song.title);
     }
 
-    // Get the total duration of the file
-    let duration = get_file_duration(input_file)?;
-    println!("Total duration: {:.2} seconds", duration);
+    // Get all video information at once
+    let video_info = get_video_info(input_file)?;
+    println!("Total duration: {:.2} seconds", video_info.duration);
 
     // First try to detect song boundaries using text overlays
     println!("Attempting to detect song boundaries using text overlays...");
-    let mut segments = detect_song_boundaries_from_text(input_file, &setlist.artist, &setlist.set_list, duration)?;
+    let mut segments = detect_song_boundaries_from_text(input_file, &setlist.artist, &setlist.set_list, &video_info)?;
     for segment in &segments {
         println!("Segment: {:?}", segment);
     }
@@ -79,7 +92,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let audio_data = extract_audio_waveform(input_file)?;
         
         // Analyze audio to find segments
-        segments = analyze_audio(&audio_data, num_songs, duration)?;
+        segments = analyze_audio(&audio_data, num_songs, video_info.duration)?;
     }
 
     println!("Found {} segments", segments.len());
@@ -101,27 +114,101 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn get_file_duration(input_file: &str) -> Result<f64, Box<dyn std::error::Error>> {
-    let output = Command::new("ffprobe")
+fn get_video_info(input_file: &str) -> Result<VideoInfo, Box<dyn std::error::Error>> {
+    println!("Analyzing video file metadata...");
+    
+    // Get basic video information in one call
+    let basic_info_output = Command::new("ffprobe")
         .args(&[
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=r_frame_rate:format=duration,start_time",
+            "-of", "json",
             input_file,
         ])
         .output()?;
 
-    if !output.status.success() {
-        return Err("Failed to get file duration".into());
+    if !basic_info_output.status.success() {
+        return Err("Failed to get video information".into());
     }
 
-    let duration_str = String::from_utf8(output.stdout)?;
-    let duration = duration_str.trim().parse::<f64>()?;
-
-    Ok(duration)
+    let info_json = String::from_utf8(basic_info_output.stdout)?;
+    let info: serde_json::Value = serde_json::from_str(&info_json)?;
+    
+    // Extract duration
+    let duration = info["format"]["duration"].as_str()
+        .ok_or("Missing duration")?
+        .parse::<f64>()?;
+        
+    // Extract start time
+    let start_time = info["format"]["start_time"].as_str()
+        .unwrap_or("0")
+        .parse::<f64>()
+        .unwrap_or(0.0);
+        
+    // Extract framerate
+    let fps_str = info["streams"][0]["r_frame_rate"].as_str().ok_or("Missing framerate")?;
+    let mut fps = 25.0; // Default fallback value
+    if let Some((num, den)) = fps_str.split_once('/') {
+        if let (Ok(n), Ok(d)) = (num.parse::<f64>(), den.parse::<f64>()) {
+            if d > 0.0 {
+                fps = n / d;
+            }
+        }
+    }
+    
+    println!("Video duration: {}s, start time: {}s, framerate: {:.2} fps", 
+             duration, start_time, fps);
+    
+    // Get keyframe timestamps
+    println!("Extracting keyframe information...");
+    let keyframe_data = Command::new("ffprobe")
+        .args(&[
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "packet=pts_time,flags",
+            "-of", "csv=print_section=0",
+            input_file,
+        ])
+        .output()?;
+    
+    let keyframe_data_str = String::from_utf8(keyframe_data.stdout)?;
+    
+    // Parse keyframe timestamps - format is "pts_time,flags" where flags contains "K" for keyframes
+    let keyframe_timestamps: Vec<f64> = keyframe_data_str
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split(',').collect();
+            if parts.len() >= 2 && parts[1].contains('K') {
+                // This is a keyframe, parse the timestamp
+                parts[0].parse::<f64>().ok()
+            } else {
+                None
+            }
+        })
+        .collect();
+    
+    println!("Found {} keyframes", keyframe_timestamps.len());
+    
+    // Calculate average keyframe interval
+    let avg_keyframe_interval = if keyframe_timestamps.len() >= 2 {
+        let interval = (keyframe_timestamps[keyframe_timestamps.len() - 1] - keyframe_timestamps[0]) / 
+                      (keyframe_timestamps.len() - 1) as f64;
+        println!("Average keyframe interval: {:.2}s", interval);
+        interval
+    } else {
+        // Default interval is 2 seconds
+        println!("Could not calculate keyframe interval, using default (2s)");
+        2.0
+    };
+    
+    Ok(VideoInfo {
+        duration,
+        framerate: fps,
+        start_time,
+        keyframe_timestamps,
+        avg_keyframe_interval,
+    })
 }
 
 fn extract_audio_waveform(input_file: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
@@ -533,8 +620,9 @@ fn detect_song_boundaries_from_text(
     input_file: &str,
     artist: &str,
     songs: &[Song],
-    total_duration: f64,
+    video_info: &VideoInfo,
 ) -> Result<Vec<AudioSegment>, Box<dyn std::error::Error>> {
+    let total_duration = video_info.duration;
     let artist_cmp = artist.to_lowercase();
     // Create a temporary directory for frames
     let temp_dir = "temp_frames";
@@ -643,8 +731,8 @@ fn detect_song_boundaries_from_text(
                 
                 // Use the common matching logic
                 if matches_song_title(&lines, song_title, overlay) {
-                    // Get accurate timestamp for this frame using ffprobe
-                    let timestamp = get_frame_timestamp(input_file, frame_num)?;
+                    // Get accurate timestamp for this frame using the video info
+                    let timestamp = get_frame_timestamp(video_info, frame_num);
                     
                     println!("Match found! '{}' matches song '{}' at {}s (frame {})", 
                             filtered_text, song.title, timestamp, frame_num);
@@ -759,7 +847,7 @@ fn refine_song_start_time(
     println!("Refining start time for '{}' (initially at {}s)...", song_title, initial_timestamp);
     
     // Define the time window to look before the detected timestamp
-    let look_back_seconds = 10.0;
+    let look_back_seconds = 3.0;
     let start_time = if initial_timestamp > look_back_seconds {
         initial_timestamp - look_back_seconds
     } else {
@@ -772,18 +860,17 @@ fn refine_song_start_time(
         fs::create_dir(&refined_dir)?;
     }
     
-    // Extract more frequent frames within the time window
-    println!("Extracting additional frames from {}s to {}s...", start_time, initial_timestamp);
+    // Extract more frequent frames within the time window (4 frames per second)
+    println!("Extracting additional frames from {}s to {}s at 4 fps...", start_time, initial_timestamp);
     let status = Command::new("ffmpeg")
         .args(&[
             "-ss", &format!("{}", start_time),
             "-to", &format!("{}", initial_timestamp),
             "-i", input_file,
             "-c:v", "png",
-            "-vf", "fps=4,scale=400:200,crop=iw/1.5:ih/5:0:160", // 4 frames per second
-            "-frame_pts", "1", // output the time as the file name
+            "-vf", "fps=4,scale=400:200,crop=iw/1.5:ih/5:0:160", // Exactly 4 frames per second
             "-qscale:v", "31",          // Quality setting
-            &format!("{}/%d.png", refined_dir),
+            &format!("{}/%d.png", refined_dir), // Sequential numbering starting from 1
         ])
         .status()?;
     
@@ -848,13 +935,15 @@ fn refine_song_start_time(
             // If we see the artist overlay that's good enough.
             // On the initial fade in we might be able to see the artist name but not the song title.
             if overlay || matches_song_title(&lines, song_title, overlay) {
-                // Calculate approximate timestamp for this frame
-                // We know start_time and duration, so interpolate based on frame position
-                let frame_position = frame_num as f64;
-                let frame_time = start_time + (initial_timestamp - start_time) * (frame_position / frame_count);
+                // Calculate exact timestamp for this frame
+                // Since we're using fps=4, each frame is exactly 0.25 seconds
+                // Frame numbers start at 1, so frame 1 = start_time, frame 2 = start_time + 0.25, etc.
+                let fps = 4.0; // Matches the fps value in the ffmpeg command
+                let frame_time = start_time + ((frame_num - 1) as f64 / fps);
                 
-                println!("Earlier match for '{}' at {}s (frame {})", 
-                        song_title, frame_time, frame_num);
+                println!("Earlier match for '{}' at {}s (frame {}/{}, +{}s from start)", 
+                        song_title, frame_time, frame_num, frame_count, 
+                        (frame_num - 1) as f64 / fps);
                 
                 if earliest_match == 0.0 || frame_time < earliest_match {
                     earliest_match = frame_time;
@@ -874,119 +963,27 @@ fn refine_song_start_time(
     Ok(earliest_match)
 }
 
-fn get_frame_timestamp(input_file: &str, frame_num: usize) -> Result<f64, Box<dyn std::error::Error>> {
-    // First, get the video frame rate to convert frame number to timestamp
-    let fps_output = Command::new("ffprobe")
-        .args(&[
-            "-v", "error",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=r_frame_rate",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            input_file,
-        ])
-        .output()?;
-    
-    let fps_str = String::from_utf8_lossy(&fps_output.stdout).trim().to_string();
-    
-    // Parse the framerate (usually in the format "numerator/denominator")
-    let mut fps = 25.0; // Default fallback value
-    if let Some((num, den)) = fps_str.split_once('/') {
-        if let (Ok(n), Ok(d)) = (num.parse::<f64>(), den.parse::<f64>()) {
-            if d > 0.0 {
-                fps = n / d;
-                println!("Video framerate: {}/{} = {:.2} fps", n, d, fps);
-            }
-        }
-    } else {
-        println!("Could not parse framerate '{}', using default: {:.2} fps", fps_str, fps);
-    }
-    
-    // Get keyframe timestamps by examining keyframe packets
-    println!("Getting keyframe timestamps from video...");
-    let keyframe_data = Command::new("ffprobe")
-        .args(&[
-            "-v", "error",
-            "-select_streams", "v:0",
-            "-show_entries", "packet=pts_time,flags",
-            "-of", "csv=print_section=0",
-            input_file,
-        ])
-        .output()?;
-    
-    let keyframe_data_str = String::from_utf8_lossy(&keyframe_data.stdout);
-    
-    // Parse keyframe timestamps - format is "pts_time,flags" where flags contains "K" for keyframes
-    let keyframe_timestamps: Vec<f64> = keyframe_data_str
-        .lines()
-        .filter_map(|line| {
-            let parts: Vec<&str> = line.split(',').collect();
-            if parts.len() >= 2 && parts[1].contains('K') {
-                // This is a keyframe, parse the timestamp
-                parts[0].parse::<f64>().ok()
-            } else {
-                None
-            }
-        })
-        .collect();
-    
-    println!("Found {} keyframe timestamps", keyframe_timestamps.len());
-    if !keyframe_timestamps.is_empty() {
-        println!("First keyframe at: {}s, Last keyframe at: {}s", 
-                 keyframe_timestamps[0], 
-                 keyframe_timestamps[keyframe_timestamps.len() - 1]);
-    }
-    
+fn get_frame_timestamp(video_info: &VideoInfo, frame_num: usize) -> f64 {
     // If we have enough keyframes, map the frame number to the correct keyframe
-    // Assuming frame numbers from FFmpeg extraction correspond to keyframes
-    if !keyframe_timestamps.is_empty() {
+    if !video_info.keyframe_timestamps.is_empty() {
         // Frame numbers are 1-indexed in our extraction, but array is 0-indexed
         let index = if frame_num > 0 { frame_num - 1 } else { 0 };
         
-        if index < keyframe_timestamps.len() {
-            println!("Using direct keyframe timestamp: {} for frame {}", 
-                    keyframe_timestamps[index], frame_num);
-            return Ok(keyframe_timestamps[index]);
+        if index < video_info.keyframe_timestamps.len() {
+            println!("Using direct keyframe timestamp: {}s for frame {}", 
+                    video_info.keyframe_timestamps[index], frame_num);
+            return video_info.keyframe_timestamps[index];
         } else {
             println!("Frame number {} exceeds available keyframes {}, using estimation", 
-                    frame_num, keyframe_timestamps.len());
+                    frame_num, video_info.keyframe_timestamps.len());
         }
-    } else {
-        println!("No keyframe timestamps available, using estimation");
     }
     
-    // Fallback - estimate timestamp based on framerate and assuming evenly spaced keyframes
-    let start_time_output = Command::new("ffprobe")
-        .args(&[
-            "-v", "error",
-            "-select_streams", "v:0",
-            "-show_entries", "format=start_time",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            input_file,
-        ])
-        .output()?;
-    
-    let start_time_str = String::from_utf8_lossy(&start_time_output.stdout).trim().to_string();
-    let start_time = start_time_str.parse::<f64>().unwrap_or(0.0);
-    println!("Video start time: {}s", start_time);
-    
-    // Get average keyframe interval or estimate it
-    let avg_keyframe_interval = if keyframe_timestamps.len() >= 2 {
-        let interval = (keyframe_timestamps[keyframe_timestamps.len() - 1] - keyframe_timestamps[0]) / 
-                      (keyframe_timestamps.len() - 1) as f64;
-        println!("Average keyframe interval: {:.2}s", interval);
-        interval
-    } else {
-        // Try to estimate based on GOP size (group of pictures)
-        // Most videos use a keyframe every 1-3 seconds
-        let estimated_interval = 2.0;
-        println!("Estimated keyframe interval: {:.2}s (no data available)", estimated_interval);
-        estimated_interval
-    };
-    
-    let estimated_timestamp = start_time + (frame_num as f64 * avg_keyframe_interval);
+    // Fallback - estimate timestamp based on keyframe interval
+    let estimated_timestamp = video_info.start_time + (frame_num as f64 * video_info.avg_keyframe_interval);
     println!("Estimated timestamp for frame {}: {:.2}s", frame_num, estimated_timestamp);
     
-    Ok(estimated_timestamp)
+    estimated_timestamp
 }
 
 fn sanitize_filename(input: &str) -> String {
