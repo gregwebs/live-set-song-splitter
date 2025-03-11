@@ -821,7 +821,13 @@ fn detect_song_boundaries_from_text(
 
     // Create segments from the detected song start times
     for i in 0..song_start_times.len() {
-        let start_time = song_start_times[i].1;
+        let start_time = if i == 0 {
+            // Always set the first song to start at 0 seconds
+            0.0
+        } else {
+            song_start_times[i].1
+        };
+
         let end_time = if i < song_start_times.len() - 1 {
             song_start_times[i + 1].1
         } else {
@@ -835,17 +841,7 @@ fn detect_song_boundaries_from_text(
         });
     }
 
-    // If we have a gap at the beginning, add it as a non-song segment
-    if !segments.is_empty() && segments[0].start_time > 0.0 {
-        segments.insert(
-            0,
-            AudioSegment {
-                start_time: 0.0,
-                end_time: segments[0].start_time,
-                is_song: false,
-            },
-        );
-    }
+    // Note: No need to add a gap at the beginning since first song starts at 0.0
 
     // Clean up temporary files
     // fs::remove_dir_all(temp_dir)?;
@@ -1147,7 +1143,7 @@ fn sanitize_filename(input: &str) -> String {
     sanitized
 }
 
-fn extract_segment(
+fn _extract_segment_mp4box(
     input_file: &str,
     output_file: &str,
     start_time: f64,
@@ -1175,7 +1171,7 @@ fn extract_segment(
 
 // This is really slow!
 // Perhaps because it re-encodes the audio?
-fn _extract_segment_ffmpeg(
+fn extract_segment(
     input_file: &str,
     output_file: &str,
     start_time: f64,
@@ -1189,12 +1185,12 @@ fn _extract_segment_ffmpeg(
             &format!("{:.3}", start_time),
             "-to",
             &format!("{:.3}", end_time),
-            "-c:a",
-            "aac", // AAC audio codec
-            "-b:a",
-            "192k", // Bitrate
-            "-vn",  // No video
-            "-y",   // Overwrite output file
+            // "-c:a",
+            // "aac", // AAC audio codec
+            // "-b:a",
+            // "192k", // Bitrate
+            // "-vn",  // No video
+            "-y", // Overwrite output file
             output_file,
         ])
         .status()?;
