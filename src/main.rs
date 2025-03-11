@@ -1,4 +1,10 @@
+mod ocr;
+use crate::ocr::{OcrParse, run_tesseract_ocr_parse, run_tesseract_ocr, parse_tesseract_output};
+use stringmetrics::{levenshtein_weight, LevWeights};
+
+
 use serde::{Deserialize, Serialize};
+use std::collections::{HashSet};
 use std::env;
 use std::fs::{self, File};
 use std::io::{BufReader, Read};
@@ -46,7 +52,6 @@ struct VideoInfo {
     // Basic information
     duration: f64,
     framerate: u32, // Integer frames per second
-    start_time: f64,
 
     // Frame information
     frames: Vec<FrameInfo>,
@@ -95,9 +100,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Segment: {:?}", segment);
     }
 
+    // TODO: cli option to choose between overlay and audio analysis
+    let fallback_audio_analysis = false;
+
     // If text detection didn't find enough songs, fall back to audio analysis
     if segments.iter().filter(|s| s.is_song).count() < num_songs {
-        println!("Text overlay detection didn't find all songs. Falling back to audio analysis...");
+        let msg = "Text overlay detection didn't find all songs.";
+        if !fallback_audio_analysis {
+            return Err(msg.into());
+        }
+        println!("{} Falling back to audio analysis...", msg);
 
         // Extract audio waveform data using FFmpeg
         println!("Extracting audio waveform...");
@@ -127,7 +139,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Process each detected segment
-    process_segments(input_file, &segments, &setlist.set_list, &setlist.artist, &setlist.album, &year)?;
+    process_segments(
+        input_file,
+        &segments,
+        &setlist.set_list,
+        &setlist.artist,
+        &setlist.album,
+        &year,
+    )?;
 
     println!("Audio splitting complete!");
     Ok(())
@@ -170,6 +189,9 @@ fn get_video_info(input_file: &str) -> Result<VideoInfo, Box<dyn std::error::Err
         .unwrap_or("0")
         .parse::<f64>()
         .unwrap_or(0.0);
+    if start_time != 0.0 {
+        panic!("start time is not 0, this may cause issues with audio splitting.");
+    }
 
     // Extract framerate
     let fps_str = info["streams"][0]["r_frame_rate"]
@@ -241,7 +263,6 @@ fn get_video_info(input_file: &str) -> Result<VideoInfo, Box<dyn std::error::Err
     Ok(VideoInfo {
         duration,
         framerate: fps,
-        start_time,
         frames,
         keyframe_indices,
     })
@@ -609,6 +630,14 @@ fn process_segments(
     year: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("Processing {} segments...", segments.len());
+    if segments.len() > songs.len() {
+        return Err(format!(
+            "Too many segments detected. {} segments but only {} songs provided.",
+            segments.len(),
+            songs.len()
+        )
+        .into());
+    }
 
     let mut song_counter = 0;
     let mut gap_counter = 0;
@@ -673,6 +702,14 @@ fn process_segments(
     Ok(())
 }
 
+fn frame_number_from_image_filename(frame_path: &std::path::PathBuf) -> usize {
+    let frame_name = frame_path.file_name().unwrap().to_string_lossy();
+    return frame_name
+        .strip_suffix(".png")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0);
+}
+
 fn detect_song_boundaries_from_text(
     input_file: &str,
     artist: &str,
@@ -729,106 +766,53 @@ fn detect_song_boundaries_from_text(
     let mut frames = fs::read_dir(temp_dir)?
         .filter_map(Result::ok)
         .filter(|entry| entry.path().extension().map_or(false, |ext| ext == "png"))
+        .map(|entry| entry.path())
         .collect::<Vec<_>>();
 
     println!("Extracted {} frames, analyzing for text...", frames.len());
 
     // Map to store detected song start times
     let mut song_start_times = Vec::new();
+    let mut song_title_matched: HashSet<String> = HashSet::new();
 
     // Process each frame to detect text
-    frames.sort_by(|a, b| a.path().cmp(&b.path()));
-    for frame_entry in frames {
-        let frame_path = frame_entry.path();
-        let frame_name = frame_path.file_name().unwrap().to_string_lossy();
-
+    frames.sort_by(|a, b|
+        frame_number_from_image_filename(a).cmp(&frame_number_from_image_filename(b))
+    );
+    for frame_path in frames {
         // Extract frame number to calculate timestamp
-        let frame_num = frame_name
-            .strip_suffix(".png")
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(0);
+        let frame_num = frame_number_from_image_filename(&frame_path);
 
-        // Create a temporary output file for tesseract
-        let out_txt = format!("{}/{}", temp_dir, frame_num);
+        let song_titles_to_match = &sorted_songs.iter().filter(|song|
+            // skip already matched songs
+            !song_title_matched.contains(&song.title)
+        ).map(|song| &song.title).cloned().collect::<Vec<_>>();
 
         // Run tesseract OCR on the frame
-        let status = Command::new("tesseract")
-            .args(&[frame_path.to_str().unwrap(), &out_txt, "--psm", "11"])
-            .stderr(std::process::Stdio::null())
-            .status()?;
-
-        if !status.success() {
-            println!("Warning: Tesseract failed on frame {}", frame_name);
-            continue;
-        }
-
-        // Read the OCR result
-        let out_txt_path = format!("{}.txt", out_txt);
-        if let Ok(text) = fs::read_to_string(&out_txt_path) {
-            // Use common parsing function
-            let parsed = match parse_tesseract_output(&text, &artist_cmp) {
-                Some(result) => result,
-                None => continue,
-            };
-
-            let (lines, overlay) = parsed;
-
-            // Format text for display
-            let filtered_text = if overlay {
-                lines[1..].to_vec().join("\n")
-            } else {
-                lines.to_vec().join("\n")
-            };
-
-            if overlay {
-                println!(
-                    "Frame {}: Detected overlay: '{}'",
-                    frame_name, filtered_text
-                );
-            } else {
-                // println!("Frame {}: Detected text: '{}'", frame_name, detected_text);
-            }
-
-            // Check if the detected text matches any song title
-            for song in &sorted_songs {
-                let song_title = &song.title;
-
-                // Use the common matching logic
-                if matches_song_title(&lines, song_title, overlay) {
-                    // Get accurate timestamp for this frame using the video info
-                    let frame_info = get_keyframe(video_info, frame_num);
-
-                    println!(
-                        "Match found! '{}' matches song '{}' at {}s (frame {})",
-                        filtered_text, song.title, &frame_info.timestamp, frame_num
-                    );
-
-                    // Extract additional frames around this timestamp for more accurate boundary detection
-                    let refined_timestamp = refine_song_start_time(
-                        input_file,
-                        temp_dir,
-                        &artist_cmp,
-                        song_title,
-                        frame_num,
-                        video_info,
-                    )?;
-
-                    // Use the refined timestamp if available, otherwise use the original
-                    let final_timestamp =
-                        if refined_timestamp > 0.0 && refined_timestamp < frame_info.timestamp {
-                            println!(
-                                "Refined start time for '{}': {}s (was {}s)",
-                                song_title, refined_timestamp, frame_info.timestamp
-                            );
-                            refined_timestamp
-                        } else {
-                            frame_info.timestamp
-                        };
-
-                    song_start_times.push((song.title.clone(), final_timestamp));
-                    break;
+        let parsed = run_tesseract_ocr_parse(frame_path.to_str().unwrap(), &artist_cmp, Some("11"))?;
+        match parsed {
+            Some(lo@(_, overlay)) => {
+                let title_time= match_song_titles(input_file, temp_dir, &lo, song_titles_to_match, &artist_cmp, frame_num, video_info)?;
+                if title_time.is_some() {
+                    song_title_matched.insert(title_time.as_ref().unwrap().0.clone());
+                    song_start_times.push(title_time.unwrap())
+                } else if overlay {
+                    // found some text but not a proper match
+                    // try running tesseract with a different setting
+                    let parsed2 = run_tesseract_ocr_parse(frame_path.to_str().unwrap(), &artist_cmp, None)?;
+                    match parsed2 {
+                        Some(lo) => {
+                            let title_time= match_song_titles(input_file, temp_dir, &lo, song_titles_to_match, &artist_cmp, frame_num, video_info)?;
+                            if title_time.is_some() {
+                                song_title_matched.insert(title_time.as_ref().unwrap().0.clone());
+                                song_start_times.push(title_time.unwrap())
+                            }
+                        }
+                        None => { }
+                    }
                 }
             }
+            None => { }
         }
     }
 
@@ -878,42 +862,182 @@ fn detect_song_boundaries_from_text(
     Ok(segments)
 }
 
-fn parse_tesseract_output(text: &str, artist: &str) -> Option<(Vec<String>, bool)> {
-    let detected_text = text.trim().to_lowercase();
-
-    // Skip if empty or too short
-    if detected_text.len() < 4 {
-        return None;
-    }
-
-    // Filter out empty lines
-    let lines: Vec<String> = detected_text
-        .lines()
-        .filter(|line| line.trim().len() > 0)
-        .map(|line| line.to_string())
-        .collect();
-
-    if lines.is_empty() {
-        return None;
-    }
-
-    // Check if this is an overlay with artist at the top
-    let is_overlay = !artist.is_empty() && lines[0].trim().contains(&artist.to_lowercase());
-
-    Some((lines, is_overlay))
+/// Normalize text by removing punctuation and spaces, keeping only alphanumeric characters.
+/// Also converts all characters to lowercase for case-insensitive comparison.
+fn normalize_text(text: &str) -> String {
+    text.chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect::<String>()
+        .to_lowercase()
 }
 
-fn matches_song_title(lines: &[String], song_title: &str, is_overlay: bool) -> bool {
-    for line in lines {
-        let line_lower = line.trim().to_lowercase();
-        let title_lower = song_title.to_lowercase();
+fn matches_song_title(lines: &[String], song_title: &str, is_overlay: bool) -> Option<(String, u32)> {
+    let title_normalized = normalize_text(song_title);
+    let weights = LevWeights::new(2, 2, 1);
+    let levenshtein_limit = 3;
 
-        // Check for partial match (if line contains song title or vice versa with overlay)
-        if line_lower.contains(&title_lower) || (is_overlay && title_lower.contains(&line_lower)) {
-            return true;
+    for line in lines {
+        let line_normalized = normalize_text(line);
+        
+        // Check for exact or partial match
+        if line_normalized.contains(&title_normalized) {
+            return Some((line.clone(), 0))
+        }
+        if !is_overlay {
+            continue
+        }
+        // If we have an overlay and no exact match was found, try fuzzy matching
+        let lev = levenshtein_weight(&line_normalized, &title_normalized, levenshtein_limit + 10, &weights);
+        // println!("levenshtein distance: {}. {}", lev, line);
+        if lev <= levenshtein_limit {
+            return Some((line.clone(), lev))
+        }
+        if title_normalized.starts_with(&line_normalized) {
+            if (line_normalized.len() as f64 / title_normalized.len() as f64) >= 0.4 {
+                return Some((line.clone(), (title_normalized.len() - line_normalized.len()) as u32))
+            }
         }
     }
-    false
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_text() {
+        assert_eq!(normalize_text("Hello, World!"), "helloworld");
+        assert_eq!(normalize_text("Test123"), "test123");
+        assert_eq!(normalize_text("  Spaces   "), "spaces");
+        assert_eq!(normalize_text("UPPERCASE"), "uppercase");
+        assert_eq!(normalize_text("special-@#$-chars"), "specialchars");
+    }
+
+    #[test]
+    fn test_matches_song_title() {
+        // Test exact matches
+        let lines = vec!["hello world".to_string(), "test song".to_string()];
+        assert!(matches_song_title(&lines, "test song", false).is_some());
+        
+        // Test partial matches
+        assert!(matches_song_title(&lines, "test", false).is_some());
+        assert!(matches_song_title(&lines, "song", false).is_some());
+        
+        // Test case insensitivity
+        assert!(matches_song_title(&lines, "TEST SONG", false).is_some());
+        
+        // Test with overlay
+        assert!(matches_song_title(&lines, "hello world test", true).is_some());
+        
+        // Test fuzzy matching (only works with overlay flag)
+        let ocr_lines = vec!["helo wrld".to_string()];  // OCR might miss letters
+        assert!(!matches_song_title(&ocr_lines, "hello world", false).is_some());  // Should fail without overlay
+        assert!(matches_song_title(&ocr_lines, "hello world", true).is_some());    // Should pass with overlay
+        
+        // Test non-matches
+        let other_lines = vec!["completely different".to_string()];
+        assert!(!matches_song_title(&other_lines, "test song", true).is_some());
+    }
+}
+
+fn match_song_titles(
+    input_file: &str,
+    temp_dir: &str,
+    ocr_parse: &OcrParse,
+    song_titles_to_match: &Vec<String>,
+    artist_cmp: &str,
+    frame_num: usize,
+    video_info: &VideoInfo,
+) -> Result<Option<(String, f64)>, Box<dyn std::error::Error>> {
+    let (lines, overlay) = ocr_parse;
+
+    // Format text for display
+    let filtered_text = if *overlay {
+        lines[1..].to_vec().join("\n")
+    } else {
+        lines.to_vec().join("\n")
+    };
+
+    if *overlay {
+        println!(
+            "Frame {}: Detected overlay: '{}'",
+            frame_num, filtered_text
+        );
+    } else {
+        /*
+        println!("Frame {}: Detected text: '{}'", frame_num, filtered_text);
+        */
+    }
+
+    let mut best_match: Option<(String, (String, u32))> = None;
+    for song_title in song_titles_to_match {
+        match matches_song_title(&lines, song_title, *overlay) {
+            None => {
+                continue;
+            }
+            Some(matched@(_, lev_dist)) => {
+                match best_match {
+                    None => {
+                        best_match = Some((song_title.to_string(), matched));
+                    }
+                    Some((_, (_, best_dist))) => {
+                        if lev_dist < best_dist {
+                            best_match = Some((song_title.to_string(), matched));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    match best_match {
+        None => {
+            Ok(None)
+        }
+        Some((song_title, (line, lev_dist))) => {
+            println!(
+                "Match found! '{}' matches song '{}' frame={} dist={}",
+                line, &song_title, frame_num, lev_dist,
+            );
+            match timestamp_for_song(input_file, temp_dir, &artist_cmp, &song_title, frame_num, video_info) {
+                Ok(timestamp) => {
+                    return Ok(Some((song_title.to_string(), timestamp)));
+                }
+                Err(e) => Err(e)
+            }
+        }
+    }
+}
+
+fn timestamp_for_song(
+    input_file: &str,
+    temp_dir: &str,
+    artist_cmp: &str,
+    song_title: &str,
+    frame_num: usize,
+    video_info: &VideoInfo,
+) -> Result<f64, Box<dyn std::error::Error>> {
+    // Get accurate timestamp for this frame using the video info
+    let frame_info = get_keyframe(video_info, frame_num);
+
+    // Extract additional frames around this timestamp for more accurate boundary detection
+    let refined_timestamp = refine_song_start_time(
+        input_file,
+        temp_dir,
+        &artist_cmp,
+        song_title,
+        frame_num,
+        video_info,
+    )?;
+
+    // Use the refined timestamp if available, otherwise use the original
+    let final_timestamp =
+        if refined_timestamp > 0.0 && refined_timestamp < frame_info.timestamp {
+            refined_timestamp
+        } else {
+            frame_info.timestamp
+        };
+    return Ok(final_timestamp)
 }
 
 fn refine_song_start_time(
@@ -933,13 +1057,11 @@ fn refine_song_start_time(
     );
 
     // Define the time window to look before the detected timestamp
-    let mut look_back_seconds = 3;
+    let look_back_seconds = 3;
     let start_time = if initial_timestamp > (look_back_seconds as f64) {
         initial_timestamp - (look_back_seconds as f64)
     } else {
-        if initial_timestamp == 0.0 {
-            look_back_seconds = 0;
-        } else {
+        if initial_timestamp != 0.0 {
             panic!("Initial timestamp is less than look back seconds and not zero!")
         }
         0.0
@@ -953,10 +1075,6 @@ fn refine_song_start_time(
 
     // Extract frames at original video framerate for accuracy
     let fps = video_info.framerate;
-    println!(
-        "Extracting additional frames from {}s to {}s at {} fps (video framerate)...",
-        start_time, initial_timestamp, fps
-    );
     let status = create_ffmpeg_command()
         .args(&[
             "-ss",
@@ -984,74 +1102,41 @@ fn refine_song_start_time(
     let mut frames = fs::read_dir(&refined_dir)?
         .filter_map(Result::ok)
         .filter(|entry| entry.path().extension().map_or(false, |ext| ext == "png"))
+        .map(|entry| entry.path())
         .collect::<Vec<_>>();
 
-    frames.sort_by(|a, b| a.path().cmp(&b.path()));
+    frames.sort_by(|a, b|
+        frame_number_from_image_filename(a).cmp(&frame_number_from_image_filename(b))
+    );
     println!(
-        "Analyzing {} refined frames for song title '{}'",
+        "Analyzing {} refined frames for song title '{}' from {}s to {}s at {} fps",
         frames.len(),
-        song_title
+        song_title,
+        start_time, initial_timestamp, fps
     );
 
     let mut earliest_match: Option<usize> = None;
-    let frame_count = frames.len() as f64; // Total number of frames for interpolation
 
+    let frame_count = frames.len();
     // Process each refined frame
-    for frame_entry in frames {
-        let frame_path = frame_entry.path();
-        let frame_name = frame_path.file_name().unwrap().to_string_lossy();
-
+    for frame_path in frames {
         // Extract frame number
-        let frame_num = frame_name
-            .strip_suffix(".png")
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(0);
-
-        // Create a temporary output file for tesseract
-        let out_txt = format!("{}/{}", refined_dir, frame_num);
+        let frame_num = frame_number_from_image_filename(&frame_path);
 
         // Run tesseract OCR on the frame
-        let status = Command::new("tesseract")
-            .args(&[frame_path.to_str().unwrap(), &out_txt, "--psm", "11"])
-            .stderr(std::process::Stdio::null())
-            .status()?;
+        let text = run_tesseract_ocr(frame_path.to_str().unwrap(), Some("11"))?;
+        let parsed = match parse_tesseract_output(&text, artist) {
+            Some(result) => result,
+            None => continue,
+        };
 
-        if !status.success() {
-            continue;
-        }
+        let (lines, overlay) = parsed;
 
-        // Read the OCR result
-        let out_txt_path = format!("{}.txt", out_txt);
-        if let Ok(text) = fs::read_to_string(&out_txt_path) {
-            let parsed = match parse_tesseract_output(&text, artist) {
-                Some(result) => result,
-                None => continue,
-            };
-
-            let (lines, overlay) = parsed;
-
-            // If we see the artist overlay that's good enough.
-            // On the initial fade in we might be able to see the artist name but not the song title.
-            if overlay || matches_song_title(&lines, song_title, overlay) {
-                if earliest_match.is_none() || frame_num < earliest_match.unwrap() {
-                    earliest_match = Some(frame_num);
-                    // Find the exact timestamp for this frame using the frame number and video framerate
-                    // We extract frames at the video's framerate starting from start_time
-                    let fps = video_info.framerate; // Use the actual video framerate (integer FPS)
-                    let approx_frame_time = start_time + ((frame_num - 1) as f64 / fps as f64);
-                    // Find the closest actual frame timestamp from the video
-                    let frame_time =
-                        find_nearest_frame_timestamp(approx_frame_time, &video_info.frames);
-                    println!(
-                        "Earlier match for '{}' at {}s (frame {}/{}, approx: {}s, diff: {:.3}s)",
-                        song_title,
-                        frame_time,
-                        frame_num,
-                        frame_count,
-                        approx_frame_time,
-                        (frame_time - approx_frame_time).abs()
-                    );
-                }
+        // If we see the artist overlay that's good enough.
+        // On the initial fade in we might be able to see the artist name but not the song title.
+        if overlay || matches_song_title(&lines, song_title, overlay).is_some() {
+            if earliest_match.is_none() || frame_num < earliest_match.unwrap() {
+                earliest_match = Some(frame_num);
             }
         }
     }
@@ -1059,7 +1144,7 @@ fn refine_song_start_time(
     // Return the earliest match if found, otherwise 0.0
     if let Some(earliest_match) = earliest_match {
         let subtracted_frame_num =
-            (look_back_seconds * video_info.framerate) as usize - earliest_match;
+            frame_count as usize - earliest_match;
         let mut earliest_frame_num = absolute_framenum - subtracted_frame_num as usize;
         // TODO: detect the fade in itself instead of text
         // TODO: this should be a configureable fade in value
@@ -1087,31 +1172,6 @@ fn refine_song_start_time(
     }
 }
 
-fn find_nearest_frame_timestamp(target_time: f64, frames: &[FrameInfo]) -> f64 {
-    if frames.is_empty() {
-        return target_time; // Return the target time if no frames available
-    }
-
-    // Find the timestamp closest to the target time
-    let mut closest_time = frames[0].timestamp;
-    let mut min_diff = (frames[0].timestamp - target_time).abs();
-    let mut is_keyframe = frames[0].is_keyframe;
-
-    for frame in frames {
-        let diff = (frame.timestamp - target_time).abs();
-        if diff < min_diff {
-            min_diff = diff;
-            closest_time = frame.timestamp;
-            is_keyframe = frame.is_keyframe;
-        }
-    }
-
-    println!(
-        "Found frame timestamp {}s (closest to target {}s, diff: {:.3}s, keyframe: {})",
-        closest_time, target_time, min_diff, is_keyframe
-    );
-    closest_time
-}
 
 fn get_keyframe_absolute_framenum(video_info: &VideoInfo, frame_num: usize) -> usize {
     // If we have keyframe indices, map the frame number to the correct keyframe
@@ -1136,10 +1196,12 @@ fn get_keyframe(video_info: &VideoInfo, frame_num: usize) -> FrameInfo {
     // If it's a direct frame match, return that timestamp
     let frame = video_info.frames[index];
     let is_keyframe = video_info.frames[index].is_keyframe;
+    /*
     println!(
         "Using direct frame timestamp: {}s for frame {} (keyframe: {})",
-        video_info.start_time, frame_num, is_keyframe
+        frame.timestamp, frame_num, is_keyframe
     );
+     */
     if !is_keyframe {
         panic!("Frame {} is not a keyframe", frame_num);
     }
@@ -1220,7 +1282,7 @@ fn extract_segment(
     track_number: Option<usize>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = create_ffmpeg_command();
-    
+
     cmd.args(&[
         "-i",
         input_file,
@@ -1234,26 +1296,26 @@ fn extract_segment(
     if let Some(title) = song_title {
         cmd.args(&["-metadata", &format!("title={}", title)]);
     }
-    
+
     if let Some(artist) = artist_name {
         cmd.args(&["-metadata", &format!("artist={}", artist)]);
     }
-    
+
     if let Some(album) = album_name {
         cmd.args(&["-metadata", &format!("album={}", album)]);
     }
-    
+
     if let Some(year_value) = year {
         if !year_value.is_empty() {
             cmd.args(&["-metadata", &format!("date={}", year_value)]);
         }
     }
-    
+
     // Add track number metadata
     if let Some(track) = track_number {
         cmd.args(&["-metadata", &format!("track={}", track)]);
     }
-    
+
     cmd.args(&[
         "-y", // Overwrite output file
         output_file,
