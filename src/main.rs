@@ -118,7 +118,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Process each detected segment
-    process_segments(input_file, &segments, &setlist.set_list)?;
+    process_segments(input_file, &segments, &setlist.set_list, &setlist.artist)?;
 
     println!("Audio splitting complete!");
     Ok(())
@@ -582,6 +582,7 @@ fn process_segments(
     input_file: &str,
     segments: &[AudioSegment],
     songs: &[Song],
+    artist: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("Processing {} segments...", segments.len());
 
@@ -633,6 +634,8 @@ fn process_segments(
             &output_file,
             segment.start_time,
             segment.end_time,
+            Some(song_title),
+            Some(artist),
         )?;
     }
 
@@ -1176,24 +1179,35 @@ fn extract_segment(
     output_file: &str,
     start_time: f64,
     end_time: f64,
+    song_title: Option<&str>,
+    artist_name: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let status = Command::new("ffmpeg")
-        .args(&[
-            "-i",
-            input_file,
-            "-ss",
-            &format!("{:.3}", start_time),
-            "-to",
-            &format!("{:.3}", end_time),
-            // "-c:a",
-            // "aac", // AAC audio codec
-            // "-b:a",
-            // "192k", // Bitrate
-            // "-vn",  // No video
-            "-y", // Overwrite output file
-            output_file,
-        ])
-        .status()?;
+    let mut cmd = Command::new("ffmpeg");
+    
+    cmd.args(&[
+        "-i",
+        input_file,
+        "-ss",
+        &format!("{:.3}", start_time),
+        "-to",
+        &format!("{:.3}", end_time),
+    ]);
+
+    // Add metadata if available
+    if let Some(title) = song_title {
+        cmd.args(&["-metadata", &format!("title={}", title)]);
+    }
+    
+    if let Some(artist) = artist_name {
+        cmd.args(&["-metadata", &format!("artist={}", artist)]);
+    }
+    
+    cmd.args(&[
+        "-y", // Overwrite output file
+        output_file,
+    ]);
+
+    let status = cmd.status()?;
 
     if !status.success() {
         return Err(format!("Failed to extract segment to {}", output_file).into());
