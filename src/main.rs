@@ -1,10 +1,9 @@
 mod ocr;
-use crate::ocr::{OcrParse, run_tesseract_ocr_parse, run_tesseract_ocr, parse_tesseract_output};
+use crate::ocr::{parse_tesseract_output, run_tesseract_ocr, run_tesseract_ocr_parse, OcrParse};
 use stringmetrics::{levenshtein_weight, LevWeights};
 
-
 use serde::{Deserialize, Serialize};
-use std::collections::{HashSet};
+use std::collections::HashSet;
 use std::env;
 use std::fs::{self, File};
 use std::io::{BufReader, Read};
@@ -776,43 +775,65 @@ fn detect_song_boundaries_from_text(
     let mut song_title_matched: HashSet<String> = HashSet::new();
 
     // Process each frame to detect text
-    frames.sort_by(|a, b|
+    frames.sort_by(|a, b| {
         frame_number_from_image_filename(a).cmp(&frame_number_from_image_filename(b))
-    );
+    });
     for frame_path in frames {
         // Extract frame number to calculate timestamp
         let frame_num = frame_number_from_image_filename(&frame_path);
 
-        let song_titles_to_match = &sorted_songs.iter().filter(|song|
+        let song_titles_to_match = &sorted_songs
+            .iter()
+            .filter(|song|
             // skip already matched songs
-            !song_title_matched.contains(&song.title)
-        ).map(|song| &song.title).cloned().collect::<Vec<_>>();
+            !song_title_matched.contains(&song.title))
+            .map(|song| &song.title)
+            .cloned()
+            .collect::<Vec<_>>();
 
         // Run tesseract OCR on the frame
-        let parsed = run_tesseract_ocr_parse(frame_path.to_str().unwrap(), &artist_cmp, Some("11"))?;
+        let parsed =
+            run_tesseract_ocr_parse(frame_path.to_str().unwrap(), &artist_cmp, Some("11"))?;
         match parsed {
-            Some(lo@(_, overlay)) => {
-                let title_time= match_song_titles(input_file, temp_dir, &lo, song_titles_to_match, &artist_cmp, frame_num, video_info)?;
+            Some(lo @ (_, overlay)) => {
+                let title_time = match_song_titles(
+                    input_file,
+                    temp_dir,
+                    &lo,
+                    song_titles_to_match,
+                    &artist_cmp,
+                    frame_num,
+                    video_info,
+                )?;
                 if title_time.is_some() {
                     song_title_matched.insert(title_time.as_ref().unwrap().0.clone());
                     song_start_times.push(title_time.unwrap())
                 } else if overlay {
                     // found some text but not a proper match
                     // try running tesseract with a different setting
-                    let parsed2 = run_tesseract_ocr_parse(frame_path.to_str().unwrap(), &artist_cmp, None)?;
+                    let parsed2 =
+                        run_tesseract_ocr_parse(frame_path.to_str().unwrap(), &artist_cmp, None)?;
                     match parsed2 {
                         Some(lo) => {
-                            let title_time= match_song_titles(input_file, temp_dir, &lo, song_titles_to_match, &artist_cmp, frame_num, video_info)?;
+                            let title_time = match_song_titles(
+                                input_file,
+                                temp_dir,
+                                &lo,
+                                song_titles_to_match,
+                                &artist_cmp,
+                                frame_num,
+                                video_info,
+                            )?;
                             if title_time.is_some() {
                                 song_title_matched.insert(title_time.as_ref().unwrap().0.clone());
                                 song_start_times.push(title_time.unwrap())
                             }
                         }
-                        None => { }
+                        None => {}
                     }
                 }
             }
-            None => { }
+            None => {}
         }
     }
 
@@ -871,30 +892,42 @@ fn normalize_text(text: &str) -> String {
         .to_lowercase()
 }
 
-fn matches_song_title(lines: &[String], song_title: &str, is_overlay: bool) -> Option<(String, u32)> {
+fn matches_song_title(
+    lines: &[String],
+    song_title: &str,
+    is_overlay: bool,
+) -> Option<(String, u32)> {
     let title_normalized = normalize_text(song_title);
     let weights = LevWeights::new(2, 2, 1);
     let levenshtein_limit = 3;
 
     for line in lines {
         let line_normalized = normalize_text(line);
-        
+
         // Check for exact or partial match
         if line_normalized.contains(&title_normalized) {
-            return Some((line.clone(), 0))
+            return Some((line.clone(), 0));
         }
         if !is_overlay {
-            continue
+            continue;
         }
         // If we have an overlay and no exact match was found, try fuzzy matching
-        let lev = levenshtein_weight(&line_normalized, &title_normalized, levenshtein_limit + 10, &weights);
+        let lev = levenshtein_weight(
+            &line_normalized,
+            &title_normalized,
+            levenshtein_limit + 10,
+            &weights,
+        );
         // println!("levenshtein distance: {}. {}", lev, line);
         if lev <= levenshtein_limit {
-            return Some((line.clone(), lev))
+            return Some((line.clone(), lev));
         }
         if title_normalized.starts_with(&line_normalized) {
             if (line_normalized.len() as f64 / title_normalized.len() as f64) >= 0.4 {
-                return Some((line.clone(), (title_normalized.len() - line_normalized.len()) as u32))
+                return Some((
+                    line.clone(),
+                    (title_normalized.len() - line_normalized.len()) as u32,
+                ));
             }
         }
     }
@@ -919,22 +952,22 @@ mod tests {
         // Test exact matches
         let lines = vec!["hello world".to_string(), "test song".to_string()];
         assert!(matches_song_title(&lines, "test song", false).is_some());
-        
+
         // Test partial matches
         assert!(matches_song_title(&lines, "test", false).is_some());
         assert!(matches_song_title(&lines, "song", false).is_some());
-        
+
         // Test case insensitivity
         assert!(matches_song_title(&lines, "TEST SONG", false).is_some());
-        
+
         // Test with overlay
         assert!(matches_song_title(&lines, "hello world test", true).is_some());
-        
+
         // Test fuzzy matching (only works with overlay flag)
-        let ocr_lines = vec!["helo wrld".to_string()];  // OCR might miss letters
-        assert!(!matches_song_title(&ocr_lines, "hello world", false).is_some());  // Should fail without overlay
-        assert!(matches_song_title(&ocr_lines, "hello world", true).is_some());    // Should pass with overlay
-        
+        let ocr_lines = vec!["helo wrld".to_string()]; // OCR might miss letters
+        assert!(!matches_song_title(&ocr_lines, "hello world", false).is_some()); // Should fail without overlay
+        assert!(matches_song_title(&ocr_lines, "hello world", true).is_some()); // Should pass with overlay
+
         // Test non-matches
         let other_lines = vec!["completely different".to_string()];
         assert!(!matches_song_title(&other_lines, "test song", true).is_some());
@@ -960,10 +993,7 @@ fn match_song_titles(
     };
 
     if *overlay {
-        println!(
-            "Frame {}: Detected overlay: '{}'",
-            frame_num, filtered_text
-        );
+        println!("Frame {}: Detected overlay: '{}'", frame_num, filtered_text);
     } else {
         /*
         println!("Frame {}: Detected text: '{}'", frame_num, filtered_text);
@@ -976,34 +1006,37 @@ fn match_song_titles(
             None => {
                 continue;
             }
-            Some(matched@(_, lev_dist)) => {
-                match best_match {
-                    None => {
+            Some(matched @ (_, lev_dist)) => match best_match {
+                None => {
+                    best_match = Some((song_title.to_string(), matched));
+                }
+                Some((_, (_, best_dist))) => {
+                    if lev_dist < best_dist {
                         best_match = Some((song_title.to_string(), matched));
                     }
-                    Some((_, (_, best_dist))) => {
-                        if lev_dist < best_dist {
-                            best_match = Some((song_title.to_string(), matched));
-                        }
-                    }
                 }
-            }
+            },
         }
     }
     match best_match {
-        None => {
-            Ok(None)
-        }
+        None => Ok(None),
         Some((song_title, (line, lev_dist))) => {
             println!(
                 "Match found! '{}' matches song '{}' frame={} dist={}",
                 line, &song_title, frame_num, lev_dist,
             );
-            match timestamp_for_song(input_file, temp_dir, &artist_cmp, &song_title, frame_num, video_info) {
+            match timestamp_for_song(
+                input_file,
+                temp_dir,
+                &artist_cmp,
+                &song_title,
+                frame_num,
+                video_info,
+            ) {
                 Ok(timestamp) => {
                     return Ok(Some((song_title.to_string(), timestamp)));
                 }
-                Err(e) => Err(e)
+                Err(e) => Err(e),
             }
         }
     }
@@ -1031,13 +1064,12 @@ fn timestamp_for_song(
     )?;
 
     // Use the refined timestamp if available, otherwise use the original
-    let final_timestamp =
-        if refined_timestamp > 0.0 && refined_timestamp < frame_info.timestamp {
-            refined_timestamp
-        } else {
-            frame_info.timestamp
-        };
-    return Ok(final_timestamp)
+    let final_timestamp = if refined_timestamp > 0.0 && refined_timestamp < frame_info.timestamp {
+        refined_timestamp
+    } else {
+        frame_info.timestamp
+    };
+    return Ok(final_timestamp);
 }
 
 fn refine_song_start_time(
@@ -1105,14 +1137,16 @@ fn refine_song_start_time(
         .map(|entry| entry.path())
         .collect::<Vec<_>>();
 
-    frames.sort_by(|a, b|
+    frames.sort_by(|a, b| {
         frame_number_from_image_filename(a).cmp(&frame_number_from_image_filename(b))
-    );
+    });
     println!(
         "Analyzing {} refined frames for song title '{}' from {}s to {}s at {} fps",
         frames.len(),
         song_title,
-        start_time, initial_timestamp, fps
+        start_time,
+        initial_timestamp,
+        fps
     );
 
     let mut earliest_match: Option<usize> = None;
@@ -1143,8 +1177,7 @@ fn refine_song_start_time(
 
     // Return the earliest match if found, otherwise 0.0
     if let Some(earliest_match) = earliest_match {
-        let subtracted_frame_num =
-            frame_count as usize - earliest_match;
+        let subtracted_frame_num = frame_count as usize - earliest_match;
         let mut earliest_frame_num = absolute_framenum - subtracted_frame_num as usize;
         // TODO: detect the fade in itself instead of text
         // TODO: this should be a configureable fade in value
@@ -1171,7 +1204,6 @@ fn refine_song_start_time(
         return Ok(0.0);
     }
 }
-
 
 fn get_keyframe_absolute_framenum(video_info: &VideoInfo, frame_num: usize) -> usize {
     // If we have keyframe indices, map the frame number to the correct keyframe
