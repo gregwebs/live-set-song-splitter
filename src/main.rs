@@ -29,6 +29,8 @@ struct Song {
 #[derive(Serialize, Deserialize, Debug)]
 struct SetList {
     artist: String,
+    album: String,
+    date: String,
     #[serde(rename = "setList")]
     set_list: Vec<Song>,
 }
@@ -117,8 +119,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    // Extract year from date field
+    let year = if !setlist.date.is_empty() {
+        setlist.date.split('-').next().unwrap_or("").to_string()
+    } else {
+        String::new()
+    };
+
     // Process each detected segment
-    process_segments(input_file, &segments, &setlist.set_list, &setlist.artist)?;
+    process_segments(input_file, &segments, &setlist.set_list, &setlist.artist, &setlist.album, &year)?;
 
     println!("Audio splitting complete!");
     Ok(())
@@ -128,7 +137,7 @@ fn get_video_info(input_file: &str) -> Result<VideoInfo, Box<dyn std::error::Err
     println!("Analyzing video file metadata...");
 
     // Get basic video information in one call
-    let basic_info_output = Command::new("ffprobe")
+    let basic_info_output = create_ffprobe_command()
         .args(&[
             "-v",
             "error",
@@ -183,7 +192,7 @@ fn get_video_info(input_file: &str) -> Result<VideoInfo, Box<dyn std::error::Err
 
     // Get all frame information in a single pass
     println!("Extracting all frame information...");
-    let frame_data = Command::new("ffprobe")
+    let frame_data = create_ffprobe_command()
         .args(&[
             "-v",
             "error",
@@ -238,12 +247,25 @@ fn get_video_info(input_file: &str) -> Result<VideoInfo, Box<dyn std::error::Err
     })
 }
 
+fn create_ffmpeg_command() -> Command {
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args(&["-hide_banner", "-loglevel", "warning"]);
+    cmd.stdout(std::process::Stdio::null());
+    cmd
+}
+
+fn create_ffprobe_command() -> Command {
+    let mut cmd = Command::new("ffprobe");
+    cmd.args(&["-hide_banner", "-loglevel", "warning"]);
+    cmd
+}
+
 fn extract_audio_waveform(input_file: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
     // Create a temporary WAV file
     let temp_wav = "temp_audio.wav";
 
     // Extract audio to WAV using FFmpeg
-    let status = Command::new("ffmpeg")
+    let status = create_ffmpeg_command()
         .args(&[
             "-i",
             input_file,
@@ -583,6 +605,8 @@ fn process_segments(
     segments: &[AudioSegment],
     songs: &[Song],
     artist: &str,
+    album: &str,
+    year: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("Processing {} segments...", segments.len());
 
@@ -600,7 +624,7 @@ fn process_segments(
                 gap_counter, segment.start_time, segment.end_time
             );
 
-            // extract_segment(input_file, &output_file, segment.start_time, segment.end_time)?;
+            // extract_segment(input_file, &output_file, segment.start_time, segment.end_time, None, None, None)?;
             continue;
         }
 
@@ -636,6 +660,9 @@ fn process_segments(
             segment.end_time,
             Some(song_title),
             Some(artist),
+            Some(album),
+            Some(year),
+            Some(song_counter), // Add song number as track metadata
         )?;
     }
 
@@ -668,14 +695,13 @@ fn detect_song_boundaries_from_text(
             title: song.title.to_lowercase(),
         })
         .collect();
-    println!("songs: {:?}", songs);
     // sorted_songs.clone_from_slice(songs);
     sorted_songs.sort_by(|a, b| a.title.len().partial_cmp(&b.title.len()).unwrap().reverse());
 
     println!("Extracting keyframes for song title detection...");
 
     // Extract keyframes with potential text overlays - using keyframes for better timestamp accuracy
-    let status = Command::new("ffmpeg")
+    let status = create_ffmpeg_command()
         .args(&[
             "-skip_frame",
             "nokey", // Only process keyframes
@@ -728,7 +754,7 @@ fn detect_song_boundaries_from_text(
         // Run tesseract OCR on the frame
         let status = Command::new("tesseract")
             .args(&[frame_path.to_str().unwrap(), &out_txt, "--psm", "11"])
-            .stderr(std::process::Stdio::null()) // Silence stderr output
+            .stderr(std::process::Stdio::null())
             .status()?;
 
         if !status.success() {
@@ -872,7 +898,7 @@ fn parse_tesseract_output(text: &str, artist: &str) -> Option<(Vec<String>, bool
     }
 
     // Check if this is an overlay with artist at the top
-    let is_overlay = !artist.is_empty() && lines[0].trim() == artist.to_lowercase();
+    let is_overlay = !artist.is_empty() && lines[0].trim().contains(&artist.to_lowercase());
 
     Some((lines, is_overlay))
 }
@@ -931,7 +957,7 @@ fn refine_song_start_time(
         "Extracting additional frames from {}s to {}s at {} fps (video framerate)...",
         start_time, initial_timestamp, fps
     );
-    let status = Command::new("ffmpeg")
+    let status = create_ffmpeg_command()
         .args(&[
             "-ss",
             &format!("{}", start_time),
@@ -1034,7 +1060,15 @@ fn refine_song_start_time(
     if let Some(earliest_match) = earliest_match {
         let subtracted_frame_num =
             (look_back_seconds * video_info.framerate) as usize - earliest_match;
-        let frame = video_info.frames[absolute_framenum - subtracted_frame_num as usize];
+        let mut earliest_frame_num = absolute_framenum - subtracted_frame_num as usize;
+        // TODO: detect the fade in itself instead of text
+        // TODO: this should be a configureable fade in value
+        // with a fade in we are always going to be late to detect the text
+        // here we go back just one additional frame, but should probably go back more
+        if earliest_frame_num > 1 {
+            earliest_frame_num -= 1;
+        }
+        let frame = video_info.frames[earliest_frame_num];
         let new_time = frame.timestamp;
         println!(
             "Successfully refined start time for '{}' from {}s to {}s (-{:.2}s)",
@@ -1181,8 +1215,11 @@ fn extract_segment(
     end_time: f64,
     song_title: Option<&str>,
     artist_name: Option<&str>,
+    album_name: Option<&str>,
+    year: Option<&str>,
+    track_number: Option<usize>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut cmd = Command::new("ffmpeg");
+    let mut cmd = create_ffmpeg_command();
     
     cmd.args(&[
         "-i",
@@ -1200,6 +1237,21 @@ fn extract_segment(
     
     if let Some(artist) = artist_name {
         cmd.args(&["-metadata", &format!("artist={}", artist)]);
+    }
+    
+    if let Some(album) = album_name {
+        cmd.args(&["-metadata", &format!("album={}", album)]);
+    }
+    
+    if let Some(year_value) = year {
+        if !year_value.is_empty() {
+            cmd.args(&["-metadata", &format!("date={}", year_value)]);
+        }
+    }
+    
+    // Add track number metadata
+    if let Some(track) = track_number {
+        cmd.args(&["-metadata", &format!("track={}", track)]);
     }
     
     cmd.args(&[

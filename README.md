@@ -7,7 +7,6 @@ This tool analyzes audio files to detect silence between songs in a live recordi
 ## Requirements
 - Rust (with Cargo)
 - FFmpeg (for audio analysis)
-- MP4Box (for file splitting)
 
 ## Usage
 ```bash
@@ -22,4 +21,3 @@ Where:
 1. Extracts and analyzes audio waveform data
 2. Detects silence regions using energy thresholds
 3. Identifies song boundaries
-4. Uses MP4Box to split the original file into individual song files
