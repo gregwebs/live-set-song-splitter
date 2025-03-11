@@ -827,6 +827,33 @@ fn detect_song_boundaries_from_text(
                             if title_time.is_some() {
                                 song_title_matched.insert(title_time.as_ref().unwrap().0.clone());
                                 song_start_times.push(title_time.unwrap())
+                            } else if overlay {
+                                // found some text but not a proper match
+                                // try running tesseract with a different setting
+                                let parsed3 = run_tesseract_ocr_parse(
+                                    frame_path.to_str().unwrap(),
+                                    &artist_cmp,
+                                    Some("6"),
+                                )?;
+                                match parsed3 {
+                                    Some(lo) => {
+                                        let title_time = match_song_titles(
+                                            input_file,
+                                            temp_dir,
+                                            &lo,
+                                            song_titles_to_match,
+                                            &artist_cmp,
+                                            frame_num,
+                                            video_info,
+                                        )?;
+                                        if title_time.is_some() {
+                                            song_title_matched
+                                                .insert(title_time.as_ref().unwrap().0.clone());
+                                            song_start_times.push(title_time.unwrap())
+                                        }
+                                    }
+                                    None => {}
+                                }
                             }
                         }
                         None => {}
@@ -918,7 +945,7 @@ fn matches_song_title(
             levenshtein_limit + 10,
             &weights,
         );
-        // println!("levenshtein distance: {}. {}", lev, line);
+        // println!("levenshtein distance: {}. {}. {}", lev, song_title, line);
         if lev <= levenshtein_limit {
             return Some((line.clone(), lev));
         }
