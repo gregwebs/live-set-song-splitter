@@ -1,16 +1,20 @@
 mod ocr;
-use crate::ocr::{parse_tesseract_output, run_tesseract_ocr, run_tesseract_ocr_parse, OcrParse, matches_song_title};
+use crate::ocr::{
+    matches_song_title, parse_tesseract_output, run_tesseract_ocr, run_tesseract_ocr_parse,
+    OcrParse,
+};
 mod audio;
-use crate::audio::{extract_audio_waveform, analyze_audio, AudioSegment};
+use crate::audio::{analyze_audio, extract_audio_waveform, AudioSegment};
 mod ffmpeg;
 use crate::ffmpeg::{create_ffmpeg_command, create_ffprobe_command};
+mod io;
+use crate::io::overwrite_dir;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::env;
 use std::fs::{self, File};
 use std::io::BufReader;
-use std::path::Path;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Song {
@@ -27,9 +31,9 @@ struct SetMetaData {
 
 impl SetMetaData {
     fn year(&self) -> Option<String> {
-        self.date.as_ref().and_then(|date|
-            date.split('-').next().map(|s| s.to_string())
-        )
+        self.date
+            .as_ref()
+            .and_then(|date| date.split('-').next().map(|s| s.to_string()))
     }
 
     fn folder_name(&self) -> String {
@@ -48,6 +52,7 @@ struct SetList {
 #[derive(Debug, Clone, Copy)]
 struct FrameInfo {
     timestamp: f64,
+    #[allow(dead_code)]
     is_keyframe: bool,
 }
 
@@ -59,7 +64,60 @@ struct VideoInfo {
 
     // Frame information
     frames: Vec<FrameInfo>,
+    #[allow(dead_code)]
     keyframe_indices: Vec<usize>,
+}
+
+impl VideoInfo {
+    fn get_nearest_keyframes_by_time(&self, time: f64) -> (usize, Option<usize>) {
+        let mut first_frame_num = 0;
+        // TODO: Use binary search or a different data structure to speed this up
+        for (i, frame) in self.frames.iter().enumerate() {
+            if frame.timestamp >= time {
+                return (first_frame_num, Some(i));
+            } else {
+                first_frame_num = i;
+            }
+        }
+        (first_frame_num, None)
+    }
+
+    #[allow(dead_code)]
+    fn get_keyframe_absolute_framenum(&self, frame_num: usize) -> usize {
+        // If we have keyframe indices, map the frame number to the correct keyframe
+        if self.keyframe_indices.is_empty() || self.frames.is_empty() {
+            panic!("Keyframe indices and frames must be populated");
+        }
+        // Frame numbers are 1-indexed in our extraction, but array is 0-indexed
+        let index = if frame_num > 0 { frame_num - 1 } else { 0 };
+
+        // Check if this index happens to be in our keyframes list
+        if index > self.keyframe_indices.len() {
+            panic!(
+                "Frame index {} is out of bounds for keyframe indices",
+                index
+            )
+        }
+        return self.keyframe_indices[index];
+    }
+
+    #[allow(dead_code)]
+    fn get_keyframe(&self, frame_num: usize) -> FrameInfo {
+        let index = self.get_keyframe_absolute_framenum(frame_num);
+        // If it's a direct frame match, return that timestamp
+        let frame = self.frames[index];
+        let is_keyframe = self.frames[index].is_keyframe;
+        /*
+        println!(
+            "Using direct frame timestamp: {}s for frame {} (keyframe: {})",
+            frame.timestamp, frame_num, is_keyframe
+        );
+         */
+        if !is_keyframe {
+            panic!("Frame {} is not a keyframe", frame_num);
+        }
+        return frame;
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -136,11 +194,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Process each detected segment
-    process_segments(
-        input_file,
-        &segments,
-        setlist,
-    )?;
+    process_segments(input_file, &segments, setlist)?;
 
     println!("Audio splitting complete!");
     Ok(())
@@ -282,7 +336,7 @@ fn process_segments(
     let mut gap_counter = 0;
 
     let output_dir = concert.metadata.folder_name();
-    fs::create_dir(&output_dir)?;
+    overwrite_dir(&output_dir)?;
     for segment in segments.iter() {
         if !segment.is_song {
             // Optionally process gaps
@@ -359,10 +413,7 @@ fn detect_song_boundaries_from_text(
     let artist_cmp = artist.to_lowercase();
     // Create a temporary directory for frames
     let temp_dir = "temp_frames";
-    if Path::new(temp_dir).exists() {
-        fs::remove_dir_all(temp_dir)?;
-    }
-    fs::create_dir(temp_dir)?;
+    overwrite_dir(temp_dir)?;
 
     let mut sorted_songs: Vec<Song> = songs
         .to_vec()
@@ -374,28 +425,28 @@ fn detect_song_boundaries_from_text(
     // sorted_songs.clone_from_slice(songs);
     sorted_songs.sort_by(|a, b| a.title.len().partial_cmp(&b.title.len()).unwrap().reverse());
 
-    println!("Extracting keyframes for song title detection...");
+    println!("Extracting frames every 2 seconds for song title detection...");
 
-    // Extract keyframes with potential text overlays - using keyframes for better timestamp accuracy
+    // Extract frames every 2 seconds with potential text overlays
     let status = create_ffmpeg_command()
         .args(&[
-            "-skip_frame",
-            "nokey", // Only process keyframes
             "-i",
             input_file,
             "-c:v",
             "png",
-            "-vsync",
-            "0", // Use original timestamps
+            "-frame_pts",
+            "1",
+            "-fps_mode",
+            "passthrough", // Use original timestamps (replaces -vsync 0)
             "-qscale:v",
             "31", // Quality setting
             "-vf",
-            "scale=400:200,crop=iw/1.5:ih/5:0:160", // Focus on the text area
-            &format!("{}/%d.png", temp_dir),        // Use sequential numbering
+            "fps=1,select='not(mod(t,2))',scale=400:200,crop=iw/1.5:ih/5:0:160", // Extract 1 frame every 2 seconds, focus on the text area
+            &format!("{}/%d.png", temp_dir), // Use sequential numbering
         ])
         .status()?;
 
-    println!("Keyframes extracted successfully.");
+    println!("Frames extracted every 2 seconds successfully.");
 
     if !status.success() {
         return Err("Failed to extract frames".into());
@@ -626,9 +677,6 @@ fn timestamp_for_song(
     frame_num: usize,
     video_info: &VideoInfo,
 ) -> Result<f64, Box<dyn std::error::Error>> {
-    // Get accurate timestamp for this frame using the video info
-    let frame_info = get_keyframe(video_info, frame_num);
-
     // Extract additional frames around this timestamp for more accurate boundary detection
     let refined_timestamp = refine_song_start_time(
         input_file,
@@ -640,10 +688,10 @@ fn timestamp_for_song(
     )?;
 
     // Use the refined timestamp if available, otherwise use the original
-    let final_timestamp = if refined_timestamp > 0.0 && refined_timestamp < frame_info.timestamp {
+    let final_timestamp = if refined_timestamp > 0.0 && refined_timestamp < (frame_num as f64) {
         refined_timestamp
     } else {
-        frame_info.timestamp
+        frame_num as f64
     };
     return Ok(final_timestamp);
 }
@@ -653,12 +701,10 @@ fn refine_song_start_time(
     temp_dir: &str,
     artist: &str,
     song_title: &str,
-    keyframe_num: usize,
+    initial_frame_num: usize,
     video_info: &VideoInfo,
 ) -> Result<f64, Box<dyn std::error::Error>> {
-    let absolute_framenum = get_keyframe_absolute_framenum(video_info, keyframe_num);
-    let keyframe_info = video_info.frames[absolute_framenum];
-    let initial_timestamp = keyframe_info.timestamp;
+    let initial_timestamp = initial_frame_num as f64;
     println!(
         "Refining start time for '{}' (initially at {}s)...",
         song_title, initial_timestamp
@@ -675,11 +721,18 @@ fn refine_song_start_time(
         0.0
     };
 
+    // move forward to the closest keyframe
+    let (_, after_opt) = video_info.get_nearest_keyframes_by_time(initial_frame_num as f64);
+    let (end_fram_num, end_timestamp) = if let Some(after_key_frame) = after_opt {
+        (after_key_frame, video_info.frames[after_key_frame].timestamp)
+    } else {
+        panic!("Could not find keyframe after initial timestamp!")
+    };
+    println!("looking back from {} to keyframe at {}", initial_timestamp, end_timestamp);
+
     // Create a subdirectory for the refined frames
     let refined_dir = format!("{}/refined_{}", temp_dir, song_title.replace(" ", "_"));
-    if !Path::new(&refined_dir).exists() {
-        fs::create_dir(&refined_dir)?;
-    }
+    overwrite_dir(&refined_dir)?;
 
     // Extract frames at original video framerate for accuracy
     let fps = video_info.framerate;
@@ -688,7 +741,7 @@ fn refine_song_start_time(
             "-ss",
             &format!("{}", start_time),
             "-to",
-            &format!("{}", initial_timestamp),
+            &format!("{}", end_timestamp),
             "-i",
             input_file,
             "-c:v",
@@ -713,21 +766,24 @@ fn refine_song_start_time(
         .map(|entry| entry.path())
         .collect::<Vec<_>>();
 
-    frames.sort_by(|a, b| {
-        frame_number_from_image_filename(a).cmp(&frame_number_from_image_filename(b))
-    });
     println!(
         "Analyzing {} refined frames for song title '{}' from {}s to {}s at {} fps",
         frames.len(),
         song_title,
         start_time,
-        initial_timestamp,
+        end_timestamp,
         fps
     );
 
     let mut earliest_match: Option<usize> = None;
 
+    frames.sort_by(|a, b| {
+        frame_number_from_image_filename(a)
+        .cmp(&frame_number_from_image_filename(b))
+        .reverse()
+    });
     let frame_count = frames.len();
+
     // Process each refined frame
     for frame_path in frames {
         // Extract frame number
@@ -748,13 +804,16 @@ fn refine_song_start_time(
             if earliest_match.is_none() || frame_num < earliest_match.unwrap() {
                 earliest_match = Some(frame_num);
             }
+        } else {
+            break
         }
     }
+    // println!("earliest match frame {:?}/{}", earliest_match, frame_count);
 
     // Return the earliest match if found, otherwise 0.0
     if let Some(earliest_match) = earliest_match {
         let subtracted_frame_num = frame_count as usize - earliest_match;
-        let mut earliest_frame_num = absolute_framenum - subtracted_frame_num as usize;
+        let mut earliest_frame_num = end_fram_num - subtracted_frame_num as usize;
         // TODO: detect the fade in itself instead of text
         // TODO: this should be a configureable fade in value
         // with a fade in we are always going to be late to detect the text
@@ -767,9 +826,9 @@ fn refine_song_start_time(
         println!(
             "Successfully refined start time for '{}' from {}s to {}s (-{:.2}s)",
             song_title,
-            initial_timestamp,
+            end_timestamp,
             new_time,
-            initial_timestamp - new_time
+            end_timestamp - new_time
         );
         Ok(new_time)
     } else {
@@ -779,57 +838,6 @@ fn refine_song_start_time(
         );
         return Ok(0.0);
     }
-}
-
-fn get_keyframe_absolute_framenum(video_info: &VideoInfo, frame_num: usize) -> usize {
-    // If we have keyframe indices, map the frame number to the correct keyframe
-    if video_info.keyframe_indices.is_empty() || video_info.frames.is_empty() {
-        panic!("Keyframe indices and frames must be populated");
-    }
-    // Frame numbers are 1-indexed in our extraction, but array is 0-indexed
-    let index = if frame_num > 0 { frame_num - 1 } else { 0 };
-
-    // Check if this index happens to be in our keyframes list
-    if index > video_info.keyframe_indices.len() {
-        panic!(
-            "Frame index {} is out of bounds for keyframe indices",
-            index
-        )
-    }
-    return video_info.keyframe_indices[index];
-}
-
-fn get_keyframe(video_info: &VideoInfo, frame_num: usize) -> FrameInfo {
-    let index = get_keyframe_absolute_framenum(video_info, frame_num);
-    // If it's a direct frame match, return that timestamp
-    let frame = video_info.frames[index];
-    let is_keyframe = video_info.frames[index].is_keyframe;
-    /*
-    println!(
-        "Using direct frame timestamp: {}s for frame {} (keyframe: {})",
-        frame.timestamp, frame_num, is_keyframe
-    );
-     */
-    if !is_keyframe {
-        panic!("Frame {} is not a keyframe", frame_num);
-    }
-    return frame;
-
-    /*
-    // Fallback - estimate timestamp based on frame interval
-    let estimated_timestamp = video_info.start_time + (frame_num as f64 / video_info.framerate);
-
-    // Find the closest actual frame timestamp
-    if !video_info.frames.is_empty() {
-        let exact_time = find_nearest_frame_timestamp(estimated_timestamp, &video_info.frames);
-        panic!("Using closest frame timestamp for frame {}: {}s (estimate: {:.2}s)",
-                frame_num, exact_time, estimated_timestamp);
-        // return exact_time;
-    }
-
-    println!("Estimated timestamp for frame {}: {:.2}s", frame_num, estimated_timestamp);
-    estimated_timestamp
-    */
 }
 
 fn sanitize_filename(input: &str) -> String {

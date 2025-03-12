@@ -1,6 +1,6 @@
-use std::io::{BufReader, Read};
-use std::fs::File;
 use crate::ffmpeg::create_ffmpeg_command;
+use std::fs::File;
+use std::io::{BufReader, Read};
 
 const SAMPLE_RATE: u32 = 44100;
 const WINDOW_SIZE: usize = 4096;
@@ -8,7 +8,6 @@ const HOP_SIZE: usize = 1024;
 const MIN_SILENCE_DURATION: f64 = 2.0; // Seconds of silence to detect a gap
 const MIN_SONG_DURATION: f64 = 30.0; // Minimum song length in seconds
 const ENERGY_THRESHOLD: f64 = 0.005; // Threshold for audio energy detection (lowered for better sensitivity)
-
 
 #[derive(Clone, Debug)]
 pub struct AudioSegment {
