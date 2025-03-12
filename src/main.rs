@@ -31,6 +31,10 @@ impl SetMetaData {
             date.split('-').next().map(|s| s.to_string())
         )
     }
+
+    fn folder_name(&self) -> String {
+        self.album.as_ref().unwrap_or(&self.artist).to_string()
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -277,6 +281,8 @@ fn process_segments(
     let mut song_counter = 0;
     let mut gap_counter = 0;
 
+    let output_dir = concert.metadata.folder_name();
+    fs::create_dir(&output_dir)?;
     for segment in segments.iter() {
         if !segment.is_song {
             // Optionally process gaps
@@ -306,7 +312,7 @@ fn process_segments(
 
         // Create a safe filename from the song title
         let safe_title = sanitize_filename(song_title);
-        let output_file = format!("{}.mp4", safe_title);
+        let output_file = format!("{}/{}.mp4", &output_dir, safe_title);
 
         println!(
             "Extracting song {}: \"{}\" - {:.2}s to {:.2}s (duration: {:.2}s)",
