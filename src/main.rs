@@ -570,7 +570,7 @@ fn refine_song_start_time(
         let frame_num = frame_number_from_image_filename(&frame_path);
 
         // Try different PSM options until we find a valid result
-        let psm_options = [Some("11"), None, Some("6")].iter();
+        let psm_options = [Some("11"), None, Some("6"), Some("12"), Some("10")].iter();
 
         let mut earliest_match_found = false;
         for &psm in psm_options {
@@ -613,11 +613,12 @@ fn refine_song_start_time(
         let frame = video_info.frames[earliest_frame_num];
         let new_time = frame.timestamp;
         println!(
-            "Successfully refined start time for '{}' from {}s to {}s (-{:.2}s)",
+            "Successfully refined start time for '{}' from {}s to {}s (-{:.2}s) frame {}",
             song_title,
             end_timestamp,
             new_time,
-            end_timestamp - new_time
+            end_timestamp - new_time,
+            earliest_match,
         );
         Ok(new_time)
     } else {
