@@ -1,9 +1,10 @@
 mod ocr;
-use crate::ocr::{matches_song_title, run_tesseract_ocr_parse, OcrParse};
+use crate::ocr::{
+    matches_song_title, matches_song_title_weighted, weights_for_greedy_extractor,
+    weights_for_stingy_extractor,
+};
 mod audio;
-use crate::audio::{analyze_audio, extract_audio_waveform, AudioSegment};
 mod ffmpeg;
-use crate::ffmpeg::create_ffmpeg_command;
 mod io;
 use crate::io::{overwrite_dir, sanitize_filename};
 mod video;
@@ -103,10 +104,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Extract audio waveform data using FFmpeg
         println!("Extracting audio waveform...");
-        let audio_data = extract_audio_waveform(input_file)?;
+        let audio_data = audio::extract_audio_waveform(input_file)?;
 
         // Analyze audio to find segments
-        segments = analyze_audio(&audio_data, num_songs, video_info.duration)?;
+        segments = audio::analyze_audio(&audio_data, num_songs, video_info.duration)?;
     }
 
     println!("Found {} segments", segments.len());
@@ -121,8 +122,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    let write_files = false;
     // Process each detected segment
-    process_segments(input_file, &segments, setlist)?;
+    if write_files {
+        process_segments(input_file, &segments, setlist)?;
+    }
 
     println!("Audio splitting complete!");
     Ok(())
@@ -130,7 +134,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn process_segments(
     input_file: &str,
-    segments: &[AudioSegment],
+    segments: &[audio::AudioSegment],
     concert: SetList,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let songs = concert.set_list;
@@ -215,12 +219,14 @@ fn frame_number_from_image_filename(frame_path: &std::path::PathBuf) -> usize {
         .unwrap_or(0);
 }
 
+const CROP_TO_TEXT: &str = "scale=400:200,crop=iw/1.5:ih/5:0:160";
+
 fn detect_song_boundaries_from_text(
     input_file: &str,
     artist: &str,
     songs: &[Song],
     video_info: &VideoInfo,
-) -> Result<Vec<AudioSegment>, Box<dyn std::error::Error>> {
+) -> Result<Vec<audio::AudioSegment>, Box<dyn std::error::Error>> {
     let total_duration = video_info.duration;
     let artist_cmp = artist.to_lowercase();
     // Create a temporary directory for frames
@@ -239,8 +245,10 @@ fn detect_song_boundaries_from_text(
 
     println!("Extracting frames every 2 seconds for song title detection...");
 
+    let every_2_seconds = "fps=1,select='not(mod(t,2))'";
+
     // Extract frames every 2 seconds with potential text overlays
-    let status = create_ffmpeg_command()
+    let status = ffmpeg::create_ffmpeg_command()
         .args(&[
             "-i",
             input_file,
@@ -253,8 +261,8 @@ fn detect_song_boundaries_from_text(
             "-qscale:v",
             "31", // Quality setting
             "-vf",
-            "fps=1,select='not(mod(t,2))',scale=400:200,crop=iw/1.5:ih/5:0:160", // Extract 1 frame every 2 seconds, focus on the text area
-            &format!("{}/%d.png", temp_dir), // Use sequential numbering
+            &format!("{},{}", every_2_seconds, CROP_TO_TEXT), // Extract 1 frame every 2 seconds, focus on the text area
+            &format!("{}/%d.png", temp_dir),                  // Use sequential numbering
         ])
         .status()?;
 
@@ -300,7 +308,8 @@ fn detect_song_boundaries_from_text(
         // Iterate through PSM options until we find a match
         for &psm in psm_options {
             // Run tesseract OCR on the frame with current PSM option
-            let parsed = run_tesseract_ocr_parse(frame_path.to_str().unwrap(), &artist_cmp, psm)?;
+            let parsed =
+                ocr::run_tesseract_ocr_parse(frame_path.to_str().unwrap(), &artist_cmp, psm)?;
 
             if let Some(lo @ (_, overlay)) = parsed {
                 let title_time = match_song_titles(
@@ -360,7 +369,7 @@ fn detect_song_boundaries_from_text(
             total_duration
         };
 
-        segments.push(AudioSegment {
+        segments.push(audio::AudioSegment {
             start_time,
             end_time,
             is_song: true,
@@ -378,7 +387,7 @@ fn detect_song_boundaries_from_text(
 fn match_song_titles(
     input_file: &str,
     temp_dir: &str,
-    ocr_parse: &OcrParse,
+    ocr_parse: &ocr::OcrParse,
     song_titles_to_match: &Vec<String>,
     artist_cmp: &str,
     frame_num: usize,
@@ -516,7 +525,7 @@ fn refine_song_start_time(
 
     // Extract frames at original video framerate for accuracy
     let fps = video_info.framerate;
-    let status = create_ffmpeg_command()
+    let status = ffmpeg::create_ffmpeg_command()
         .args(&[
             "-ss",
             &format!("{}", start_time),
@@ -527,7 +536,7 @@ fn refine_song_start_time(
             "-c:v",
             "png",
             "-vf",
-            &format!("fps={},scale=400:200,crop=iw/1.5:ih/5:0:160", fps), // Use original video framerate
+            &format!("fps={},{},{}", fps, CROP_TO_TEXT, ffmpeg::BLACK_AND_WHITE), // Use original video framerate
             "-qscale:v",
             "31",                               // Quality setting
             &format!("{}/%d.png", refined_dir), // Sequential numbering starting from 1
@@ -564,24 +573,43 @@ fn refine_song_start_time(
     });
     let frame_count = frames.len();
 
+    // Try different PSM options until we find a valid result
+    let psm_options = [
+        (weights_for_stingy_extractor(), Some("11")),
+        (weights_for_stingy_extractor(), None),
+        (weights_for_greedy_extractor(), Some("6")),
+        (weights_for_greedy_extractor(), Some("12")),
+        (weights_for_greedy_extractor(), Some("10")),
+    ];
+
     // Process each refined frame
     for frame_path in frames {
+        let frame_file = frame_path.to_str().unwrap();
+        /*
+        let mut frame_file = frame_path.to_str().unwrap().to_string();
+        frame_file.push_str("bw");
+        let status = Command::new("convert").arg("-monochrome").arg(&frame_path)
+        .arg(&frame_file).status()?;
+        if !status.success() {
+            return Err(format!("Failed to convert file to bw {}", &frame_file).into());
+        }
+        */
         // Extract frame number
         let frame_num = frame_number_from_image_filename(&frame_path);
 
-        // Try different PSM options until we find a valid result
-        let psm_options = [Some("11"), None, Some("6"), Some("12"), Some("10")].iter();
-
         let mut earliest_match_found = false;
-        for &psm in psm_options {
-            let result = run_tesseract_ocr_parse(frame_path.to_str().unwrap(), artist, psm)?;
+        for (weights, psm) in &psm_options {
+            let result = ocr::run_tesseract_ocr_parse(&frame_file, artist, *psm)?;
             match result {
                 None => continue,
                 Some(parsed) => {
                     let (lines, overlay) = parsed;
                     // If we see the artist overlay that's good enough.
                     // On the initial fade in we might be able to see the artist name but not the song title.
-                    if overlay || matches_song_title(&lines, song_title, overlay).is_some() {
+                    if overlay
+                        || matches_song_title_weighted(&lines, song_title, overlay, &weights)
+                            .is_some()
+                    {
                         if earliest_match.is_none() || frame_num < earliest_match.unwrap() {
                             earliest_match = Some(frame_num);
                             earliest_match_found = true;
@@ -602,16 +630,20 @@ fn refine_song_start_time(
     // Return the earliest match if found, otherwise 0.0
     if let Some(earliest_match) = earliest_match {
         let subtracted_frame_num = frame_count as usize - earliest_match;
-        let mut earliest_frame_num = end_fram_num - subtracted_frame_num as usize;
-        // TODO: detect the fade in itself instead of text
-        // TODO: this should be a configureable fade in value
-        // with a fade in we are always going to be late to detect the text
-        // here we go back just one additional frame, but should probably go back more
+        let earliest_frame_num = end_fram_num - subtracted_frame_num as usize;
+        // We never detect the fade soon enough
+        // So go back to the previous keyframe
+        // This then allows for video splitting without re-encoding
+        let frame = video_info.frames[earliest_frame_num];
+        let (before, __) = video_info.get_nearest_keyframes_by_time(frame.timestamp);
+        let new_time = video_info.frames[before].timestamp;
+        /*
         if earliest_frame_num > 1 {
             earliest_frame_num -= 1;
         }
         let frame = video_info.frames[earliest_frame_num];
         let new_time = frame.timestamp;
+        */
         println!(
             "Successfully refined start time for '{}' from {}s to {}s (-{:.2}s) frame {}",
             song_title,
@@ -645,7 +677,7 @@ fn extract_segment(
     concertdata: &SetMetaData,
     track_number: Option<usize>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut cmd = create_ffmpeg_command();
+    let mut cmd = ffmpeg::create_ffmpeg_command();
 
     cmd.args(&[
         "-i",

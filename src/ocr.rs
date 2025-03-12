@@ -154,14 +154,31 @@ fn normalize_text(text: &str) -> String {
         .to_lowercase()
 }
 
+pub fn weights_for_greedy_extractor() -> LevWeights {
+    LevWeights::new(2, 1, 2)
+}
+
+pub fn weights_for_stingy_extractor() -> LevWeights {
+    LevWeights::new(2, 2, 1)
+}
+
 pub fn matches_song_title(
     lines: &[String],
     song_title: &str,
     is_overlay: bool,
 ) -> Option<(String, u32)> {
-    let title_normalized = normalize_text(song_title);
     let weights = LevWeights::new(2, 2, 1);
-    let levenshtein_limit = 3;
+    matches_song_title_weighted(lines, song_title, is_overlay, &weights)
+}
+
+pub fn matches_song_title_weighted(
+    lines: &[String],
+    song_title: &str,
+    is_overlay: bool,
+    weights: &LevWeights,
+) -> Option<(String, u32)> {
+    let title_normalized = normalize_text(song_title);
+    let levenshtein_limit = (song_title.len() as f64 / 3.0).floor() as u32;
 
     for line in lines {
         let line_normalized = normalize_text(line);
@@ -170,8 +187,12 @@ pub fn matches_song_title(
         if line_normalized.contains(&title_normalized) {
             return Some((line.clone(), 0));
         }
-        if !is_overlay {
-            continue;
+        let mut levenshtein_limit = levenshtein_limit;
+        if line_normalized.len() > song_title.len() {
+            levenshtein_limit = (line_normalized.len() as f64 / 3.0).floor() as u32;
+        }
+        if is_overlay {
+            levenshtein_limit += 1
         }
         // If we have an overlay and no exact match was found, try fuzzy matching
         let lev = levenshtein_weight(
@@ -207,6 +228,19 @@ mod tests_matches_song_title {
         assert_eq!(normalize_text("  Spaces   "), "spaces");
         assert_eq!(normalize_text("UPPERCASE"), "uppercase");
         assert_eq!(normalize_text("special-@#$-chars"), "specialchars");
+    }
+
+    #[test]
+    fn test_matches_song_title_weighted() {
+        // Test punctuation
+        let greedy = weights_for_greedy_extractor();
+        assert!(matches_song_title_weighted(
+            &vec!["__ My Everythi".to_string()],
+            "My Everything",
+            false,
+            &greedy
+        )
+        .is_some());
     }
 
     #[test]

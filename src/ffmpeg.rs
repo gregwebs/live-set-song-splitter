@@ -1,5 +1,9 @@
 use std::process::Command;
 
+// these ones worked okay
+// pub const BLACK_AND_WHITE: &str = "hue=s=0";
+pub const BLACK_AND_WHITE: &str = "format=gray,maskfun=low=128:high=128:fill=0:sum=128";
+
 pub fn create_ffmpeg_command() -> Command {
     let mut cmd = Command::new("ffmpeg");
     cmd.args(&["-hide_banner", "-loglevel", "warning"]);
