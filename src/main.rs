@@ -31,11 +31,26 @@ struct Song {
     title: String,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct SetMetaData {
+    artist: String,
+    album: Option<String>,
+    date: Option<String>,
+    show: Option<String>,
+}
+
+impl SetMetaData {
+    fn year(&self) -> Option<String> {
+        self.date.as_ref().and_then(|date|
+            date.split('-').next().map(|s| s.to_string())
+        )
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 struct SetList {
-    artist: String,
-    album: String,
-    date: String,
+    #[serde(flatten)]
+    metadata: SetMetaData,
     #[serde(rename = "setList")]
     set_list: Vec<Song>,
 }
@@ -76,7 +91,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let num_songs = setlist.set_list.len();
 
     println!("Analyzing file: {}", input_file);
-    println!("Artist: {}", setlist.artist);
+    println!("Artist: {}", setlist.metadata.artist);
     println!("Expected number of songs: {}", num_songs);
     println!("Songs:");
     for (i, song) in setlist.set_list.iter().enumerate() {
@@ -91,7 +106,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Attempting to detect song boundaries using text overlays...");
     let mut segments = detect_song_boundaries_from_text(
         input_file,
-        &setlist.artist,
+        &setlist.metadata.artist,
         &setlist.set_list,
         &video_info,
     )?;
@@ -130,21 +145,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    // Extract year from date field
-    let year = if !setlist.date.is_empty() {
-        setlist.date.split('-').next().unwrap_or("").to_string()
-    } else {
-        String::new()
-    };
-
     // Process each detected segment
     process_segments(
         input_file,
         &segments,
-        &setlist.set_list,
-        &setlist.artist,
-        &setlist.album,
-        &year,
+        setlist,
     )?;
 
     println!("Audio splitting complete!");
@@ -623,11 +628,9 @@ fn adjust_segments_for_song_count(segments: &mut Vec<AudioSegment>, expected_son
 fn process_segments(
     input_file: &str,
     segments: &[AudioSegment],
-    songs: &[Song],
-    artist: &str,
-    album: &str,
-    year: &str,
+    concert: SetList,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let songs = concert.set_list;
     println!("Processing {} segments...", segments.len());
     if segments.len() > songs.len() {
         return Err(format!(
@@ -687,9 +690,7 @@ fn process_segments(
             segment.start_time,
             segment.end_time,
             Some(song_title),
-            Some(artist),
-            Some(album),
-            Some(year),
+            &concert.metadata,
             Some(song_counter), // Add song number as track metadata
         )?;
     }
@@ -1335,9 +1336,7 @@ fn extract_segment(
     start_time: f64,
     end_time: f64,
     song_title: Option<&str>,
-    artist_name: Option<&str>,
-    album_name: Option<&str>,
-    year: Option<&str>,
+    concertdata: &SetMetaData,
     track_number: Option<usize>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = create_ffmpeg_command();
@@ -1351,20 +1350,18 @@ fn extract_segment(
         &format!("{:.3}", end_time),
     ]);
 
+    cmd.args(&["-metadata", &format!("artist={}", concertdata.artist)]);
+
     // Add metadata if available
     if let Some(title) = song_title {
         cmd.args(&["-metadata", &format!("title={}", title)]);
     }
 
-    if let Some(artist) = artist_name {
-        cmd.args(&["-metadata", &format!("artist={}", artist)]);
-    }
-
-    if let Some(album) = album_name {
+    if let Some(ref album) = concertdata.album {
         cmd.args(&["-metadata", &format!("album={}", album)]);
     }
 
-    if let Some(year_value) = year {
+    if let Some(year_value) = concertdata.year() {
         if !year_value.is_empty() {
             cmd.args(&["-metadata", &format!("date={}", year_value)]);
         }
