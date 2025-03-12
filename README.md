@@ -10,14 +10,13 @@ This tool analyzes audio files to detect silence between songs in a live recordi
 
 ## Usage
 ```bash
-cargo run -- <input_file> <num_songs>
+cargo run -- <input_file> <concert_description>
 ```
 
 Where:
 - `input_file` is the path to your audio/video file
-- `num_songs` is the expected number of songs in the recording
+- `concert_description` is JSON describing the recording and expected songs
 
 ## How it works
-1. Extracts and analyzes audio waveform data
-2. Detects silence regions using energy thresholds
-3. Identifies song boundaries
+
+It looks for the text overlay with the artist and song title in the video frames.

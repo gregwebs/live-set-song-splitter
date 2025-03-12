@@ -10,11 +10,26 @@ use crate::io::{overwrite_dir, sanitize_filename};
 mod video;
 use crate::video::VideoInfo;
 
+use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::env;
 use std::fs::{self, File};
 use std::io::BufReader;
+
+/// Tool for splitting live music recordings into individual songs
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Cli {
+    /// Input video file (mp4)
+    input_file: String,
+
+    /// Setlist JSON file
+    setlist_file: String,
+
+    /// Don't save individual song files (analysis only)
+    #[arg(long)]
+    no_save_songs: bool,
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Song {
@@ -50,15 +65,11 @@ struct SetList {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = env::args().collect();
-    if args.len() < 3 {
-        eprintln!("Usage: {} <input_mp4_file> <setlist.json>", args[0]);
-        eprintln!("Example JSON: {{\"artist\": \"Artist Name\", \"setList\": [{{\"title\": \"Song Title 1\"}}, {{\"title\": \"Song Title 2\"}}]}}");
-        return Ok(());
-    }
+    // Parse command line arguments using clap
+    let cli = Cli::parse();
 
-    let input_file = &args[1];
-    let setlist_path = &args[2];
+    let input_file = &cli.input_file;
+    let setlist_path = &cli.setlist_file;
 
     // Parse the JSON setlist file
     let setlist_file = File::open(setlist_path)?;
@@ -122,9 +133,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let write_files = false;
-    // Process each detected segment
-    if write_files {
+    // Process each detected segment (skip if --no-save-songs is provided)
+    if !cli.no_save_songs {
         process_segments(input_file, &segments, setlist)?;
     }
 
