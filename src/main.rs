@@ -1,6 +1,6 @@
 mod ocr;
 use crate::ocr::{
-    matches_song_title, parse_tesseract_output, run_tesseract_ocr, run_tesseract_ocr_parse,
+    matches_song_title, run_tesseract_ocr_parse,
     OcrParse,
 };
 mod audio;
@@ -482,11 +482,15 @@ fn detect_song_boundaries_from_text(
             .cloned()
             .collect::<Vec<_>>();
 
-        // Run tesseract OCR on the frame
-        let parsed =
-            run_tesseract_ocr_parse(frame_path.to_str().unwrap(), &artist_cmp, Some("11"))?;
-        match parsed {
-            Some(lo @ (_, overlay)) => {
+        // Define an iterator for different PSM options
+        let psm_options = [Some("11"), None, Some("6")].iter();
+        
+        // Iterate through PSM options until we find a match
+        for &psm in psm_options {
+            // Run tesseract OCR on the frame with current PSM option
+            let parsed = run_tesseract_ocr_parse(frame_path.to_str().unwrap(), &artist_cmp, psm)?;
+            
+            if let Some(lo @ (_, overlay)) = parsed {
                 let title_time = match_song_titles(
                     input_file,
                     temp_dir,
@@ -496,62 +500,20 @@ fn detect_song_boundaries_from_text(
                     frame_num,
                     video_info,
                 )?;
-                if title_time.is_some() {
-                    song_title_matched.insert(title_time.as_ref().unwrap().0.clone());
-                    song_start_times.push(title_time.unwrap())
-                } else if overlay {
-                    // found some text but not a proper match
-                    // try running tesseract with a different setting
-                    let parsed2 =
-                        run_tesseract_ocr_parse(frame_path.to_str().unwrap(), &artist_cmp, None)?;
-                    match parsed2 {
-                        Some(lo) => {
-                            let title_time = match_song_titles(
-                                input_file,
-                                temp_dir,
-                                &lo,
-                                song_titles_to_match,
-                                &artist_cmp,
-                                frame_num,
-                                video_info,
-                            )?;
-                            if title_time.is_some() {
-                                song_title_matched.insert(title_time.as_ref().unwrap().0.clone());
-                                song_start_times.push(title_time.unwrap())
-                            } else if overlay {
-                                // found some text but not a proper match
-                                // try running tesseract with a different setting
-                                let parsed3 = run_tesseract_ocr_parse(
-                                    frame_path.to_str().unwrap(),
-                                    &artist_cmp,
-                                    Some("6"),
-                                )?;
-                                match parsed3 {
-                                    Some(lo) => {
-                                        let title_time = match_song_titles(
-                                            input_file,
-                                            temp_dir,
-                                            &lo,
-                                            song_titles_to_match,
-                                            &artist_cmp,
-                                            frame_num,
-                                            video_info,
-                                        )?;
-                                        if title_time.is_some() {
-                                            song_title_matched
-                                                .insert(title_time.as_ref().unwrap().0.clone());
-                                            song_start_times.push(title_time.unwrap())
-                                        }
-                                    }
-                                    None => {}
-                                }
-                            }
-                        }
-                        None => {}
-                    }
+                
+                if let Some(time_match) = title_time {
+                    song_title_matched.insert(time_match.0.clone());
+                    song_start_times.push(time_match);
+                    break; // Found a match, no need to try other PSM options
+                } else if !overlay {
+                    // If no text overlay was detected, no point in trying other PSM options
+                    break;
                 }
+                // If we found text overlay but no title match, continue to next PSM option
+            } else {
+                // If no text was detected at all, no point in trying other PSM options
+                break;
             }
-            None => {}
         }
     }
 
@@ -728,7 +690,7 @@ fn refine_song_start_time(
     } else {
         panic!("Could not find keyframe after initial timestamp!")
     };
-    println!("looking back from {} to keyframe at {}", initial_timestamp, end_timestamp);
+    println!("looking back from keyframe {} after {}", end_timestamp, initial_timestamp);
 
     // Create a subdirectory for the refined frames
     let refined_dir = format!("{}/refined_{}", temp_dir, song_title.replace(" ", "_"));
@@ -789,22 +751,31 @@ fn refine_song_start_time(
         // Extract frame number
         let frame_num = frame_number_from_image_filename(&frame_path);
 
-        // Run tesseract OCR on the frame
-        let text = run_tesseract_ocr(frame_path.to_str().unwrap(), Some("11"))?;
-        let parsed = match parse_tesseract_output(&text, artist) {
-            Some(result) => result,
-            None => continue,
-        };
-
-        let (lines, overlay) = parsed;
-
-        // If we see the artist overlay that's good enough.
-        // On the initial fade in we might be able to see the artist name but not the song title.
-        if overlay || matches_song_title(&lines, song_title, overlay).is_some() {
-            if earliest_match.is_none() || frame_num < earliest_match.unwrap() {
-                earliest_match = Some(frame_num);
+        // Try different PSM options until we find a valid result
+        let psm_options = [Some("11"), None, Some("6")].iter();
+        
+        let mut earliest_match_found = false;
+        for &psm in psm_options {
+            let result = run_tesseract_ocr_parse(frame_path.to_str().unwrap(), artist, psm)?;
+            match result {
+                None => { continue }
+                Some(parsed) => {
+                    let (lines, overlay) = parsed;
+                    // If we see the artist overlay that's good enough.
+                    // On the initial fade in we might be able to see the artist name but not the song title.
+                    if overlay || matches_song_title(&lines, song_title, overlay).is_some() {
+                        if earliest_match.is_none() || frame_num < earliest_match.unwrap() {
+                            earliest_match = Some(frame_num);
+                            earliest_match_found = true;
+                        }
+                    }
+                }
             }
-        } else {
+        }
+
+        // If we go to an earlier time finding the match becomes harder, so break once we can no longer match
+        // wait for earliest_match to be present because of the keyframe adjustment
+        if earliest_match.is_some() && !earliest_match_found {
             break
         }
     }
