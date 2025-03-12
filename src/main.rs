@@ -29,6 +29,10 @@ struct Cli {
     /// Don't save individual song files (analysis only)
     #[arg(long)]
     no_save_songs: bool,
+
+    /// Use timestamps from a previously generated JSON file
+    #[arg(long)]
+    timestamps_file: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -64,6 +68,21 @@ struct SetList {
     set_list: Vec<Song>,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+struct SongTimestamp {
+    title: String,
+    start_time: f64,
+    end_time: f64,
+    duration: f64,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct OutputMetadata {
+    #[serde(flatten)]
+    metadata: SetMetaData,
+    songs: Vec<SongTimestamp>,
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse command line arguments using clap
     let cli = Cli::parse();
@@ -90,38 +109,84 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let video_info = VideoInfo::from_ffprobe_file(input_file)?;
     println!("Total duration: {:.2} seconds", video_info.duration);
 
-    // First try to detect song boundaries using text overlays
-    println!("Attempting to detect song boundaries using text overlays...");
-    let mut segments = detect_song_boundaries_from_text(
-        input_file,
-        &setlist.metadata.artist,
-        &setlist.set_list,
-        &video_info,
-    )?;
-    for segment in &segments {
-        println!("Segment: {:?}", segment);
-    }
+    let mut segments = Vec::new();
+    #[allow(unused_assignments)]
+    let mut output_metadata: Option<OutputMetadata> = None;
 
-    // TODO: cli option to choose between overlay and audio analysis
-    let fallback_audio_analysis = false;
+    // If timestamps file is provided, read from it instead of detecting segments
+    if let Some(timestamps_path) = &cli.timestamps_file {
+        println!("Reading song timestamps from file: {}", timestamps_path);
+        let timestamps_file = File::open(timestamps_path)?;
+        let timestamps_reader = BufReader::new(timestamps_file);
+        let timestamps_data: OutputMetadata = serde_json::from_reader(timestamps_reader)?;
 
-    // If text detection didn't find enough songs, fall back to audio analysis
-    if segments.iter().filter(|s| s.is_song).count() < num_songs {
-        let msg = "Text overlay detection didn't find all songs.";
-        if !fallback_audio_analysis {
-            return Err(msg.into());
+        // Create segments from the timestamps
+        for song in &timestamps_data.songs {
+            segments.push(audio::AudioSegment {
+                start_time: song.start_time,
+                end_time: song.end_time,
+                is_song: true,
+            });
         }
-        println!("{} Falling back to audio analysis...", msg);
 
-        // Extract audio waveform data using FFmpeg
-        println!("Extracting audio waveform...");
-        let audio_data = audio::extract_audio_waveform(input_file)?;
+        output_metadata = Some(timestamps_data);
 
-        // Analyze audio to find segments
-        segments = audio::analyze_audio(&audio_data, num_songs, video_info.duration)?;
+        println!(
+            "Loaded {} song segments from timestamps file",
+            segments.len()
+        );
+    } else {
+        // First try to detect song boundaries using text overlays
+        println!("Attempting to detect song boundaries using text overlays...");
+        segments = detect_song_boundaries_from_text(
+            input_file,
+            &setlist.metadata.artist,
+            &setlist.set_list,
+            &video_info,
+        )?;
+        for segment in &segments {
+            println!("Segment: {:?}", segment);
+        }
+
+        // TODO: cli option to choose between overlay and audio analysis
+        let fallback_audio_analysis = false;
+
+        // If text detection didn't find enough songs, fall back to audio analysis
+        if segments.iter().filter(|s| s.is_song).count() < num_songs {
+            let msg = "Text overlay detection didn't find all songs.";
+            if !fallback_audio_analysis {
+                return Err(msg.into());
+            }
+            println!("{} Falling back to audio analysis...", msg);
+
+            // Extract audio waveform data using FFmpeg
+            println!("Extracting audio waveform...");
+            let audio_data = audio::extract_audio_waveform(input_file)?;
+
+            // Analyze audio to find segments
+            segments = audio::analyze_audio(&audio_data, num_songs, video_info.duration)?;
+        }
+        println!("Found {} segments", segments.len());
+
+        // Create song timestamps and output JSON file
+        let song_timestamps = create_song_timestamps(&segments, &setlist.set_list);
+
+        // Create output metadata
+        output_metadata = Some(OutputMetadata {
+            metadata: setlist.metadata.clone(),
+            songs: song_timestamps,
+        });
+
+        // Create output directory for JSON file even if we don't save songs
+        let output_dir = setlist.metadata.folder_name();
+        fs::create_dir_all(&output_dir)?;
+        // Write output metadata to JSON file
+        let json_file_path = format!("{}/timestamps.json", &output_dir);
+        let json_content = serde_json::to_string_pretty(output_metadata.as_ref().unwrap())?;
+        std::fs::write(&json_file_path, json_content)?;
+        println!("Song timestamps written to {}", json_file_path);
     }
 
-    println!("Found {} segments", segments.len());
     for (i, segment) in segments.iter().enumerate() {
         println!(
             "Segment {}: {:.2}s to {:.2}s ({:.2}s) - {}",
@@ -135,17 +200,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Process each detected segment (skip if --no-save-songs is provided)
     if !cli.no_save_songs {
-        process_segments(input_file, &segments, setlist)?;
+        let output_dir = output_metadata.unwrap().metadata.folder_name();
+        fs::create_dir_all(&output_dir)?;
+        process_segments(input_file, &segments, setlist, &output_dir)?;
     }
 
     println!("Audio splitting complete!");
     Ok(())
 }
 
+fn create_song_timestamps(
+    segments: &[audio::AudioSegment],
+    song_list: &[Song],
+) -> Vec<SongTimestamp> {
+    let mut song_timestamps = Vec::new();
+    let mut song_counter = 0;
+
+    for segment in segments.iter() {
+        if !segment.is_song {
+            // Skip gaps
+            continue;
+        }
+
+        // Process song
+        song_counter += 1;
+
+        // Get song title
+        let song_title = if song_counter <= song_list.len() {
+            &song_list[song_counter - 1].title
+        } else {
+            // Fallback if we have more segments than songs
+            &format!("song_{}", song_counter)
+        };
+
+        // Add song to timestamps collection
+        song_timestamps.push(SongTimestamp {
+            title: song_title.to_string(),
+            start_time: segment.start_time,
+            end_time: segment.end_time,
+            duration: segment.end_time - segment.start_time,
+        });
+    }
+
+    song_timestamps
+}
+
 fn process_segments(
     input_file: &str,
     segments: &[audio::AudioSegment],
     concert: SetList,
+    output_dir: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let songs = concert.set_list;
     println!("Processing {} segments...", segments.len());
@@ -161,8 +265,6 @@ fn process_segments(
     let mut song_counter = 0;
     let mut gap_counter = 0;
 
-    let output_dir = concert.metadata.folder_name();
-    overwrite_dir(&output_dir)?;
     for segment in segments.iter() {
         if !segment.is_song {
             // Optionally process gaps
@@ -192,7 +294,7 @@ fn process_segments(
 
         // Create a safe filename from the song title
         let safe_title = sanitize_filename(song_title);
-        let output_file = format!("{}/{}.mp4", &output_dir, safe_title);
+        let output_file = format!("{}/{}.mp4", output_dir, safe_title);
 
         println!(
             "Extracting song {}: \"{}\" - {:.2}s to {:.2}s (duration: {:.2}s)",
@@ -692,6 +794,8 @@ fn extract_segment(
     cmd.args(&[
         "-i",
         input_file,
+        "-c",
+        "copy",
         "-ss",
         &format!("{:.3}", start_time),
         "-to",
