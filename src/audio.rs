@@ -2,12 +2,12 @@ use crate::ffmpeg::create_ffmpeg_command;
 use std::fs::File;
 use std::io::{BufReader, Read};
 
-const SAMPLE_RATE: u32 = 44100;
-const WINDOW_SIZE: usize = 4096;
-const HOP_SIZE: usize = 1024;
-const MIN_SILENCE_DURATION: f64 = 2.0; // Seconds of silence to detect a gap
-const MIN_SONG_DURATION: f64 = 30.0; // Minimum song length in seconds
-const ENERGY_THRESHOLD: f64 = 0.005; // Threshold for audio energy detection (lowered for better sensitivity)
+pub const SAMPLE_RATE: u32 = 44100;
+pub const WINDOW_SIZE: usize = 4096;
+pub const HOP_SIZE: usize = 1024;
+pub const MIN_SILENCE_DURATION: f64 = 2.0; // Seconds of silence to detect a gap
+pub const MIN_SONG_DURATION: f64 = 30.0; // Minimum song length in seconds
+pub const ENERGY_THRESHOLD: f64 = 0.005; // Threshold for audio energy detection (lowered for better sensitivity)
 
 #[derive(Clone, Debug)]
 pub struct AudioSegment {
@@ -104,7 +104,7 @@ pub fn analyze_audio(
     Ok(segments)
 }
 
-fn calculate_energy_profile(samples: &[f32]) -> Vec<f64> {
+pub fn calculate_energy_profile(samples: &[f32]) -> Vec<f64> {
     let mut energy_profile = Vec::new();
 
     // Calculate RMS energy for each window with hop_size step
@@ -137,7 +137,7 @@ fn calculate_energy_profile(samples: &[f32]) -> Vec<f64> {
     smoothed_profile
 }
 
-fn find_silence_points(energy_profile: &[f64], threshold: f64) -> Vec<usize> {
+pub fn find_silence_points(energy_profile: &[f64], threshold: f64) -> Vec<usize> {
     let mut silence_points = Vec::new();
     let frames_per_second = SAMPLE_RATE as f64 / HOP_SIZE as f64;
     let min_silence_frames = (MIN_SILENCE_DURATION * frames_per_second) as usize;

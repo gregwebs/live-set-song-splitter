@@ -33,6 +33,9 @@ struct Cli {
     /// Use timestamps from a previously generated JSON file
     #[arg(long)]
     timestamps_file: Option<String>,
+
+    #[arg(long)]
+    refine_timestamps: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -148,24 +151,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Segment: {:?}", segment);
         }
 
-        // TODO: cli option to choose between overlay and audio analysis
-        let fallback_audio_analysis = false;
-
-        // If text detection didn't find enough songs, fall back to audio analysis
+        // Check if text detection found enough songs
         if segments.iter().filter(|s| s.is_song).count() < num_songs {
             let msg = "Text overlay detection didn't find all songs.";
-            if !fallback_audio_analysis {
-                return Err(msg.into());
-            }
-            println!("{} Falling back to audio analysis...", msg);
-
-            // Extract audio waveform data using FFmpeg
-            println!("Extracting audio waveform...");
-            let audio_data = audio::extract_audio_waveform(input_file)?;
-
-            // Analyze audio to find segments
-            segments = audio::analyze_audio(&audio_data, num_songs, video_info.duration)?;
+            return Err(msg.into());
         }
+    }
+
+    if cli.timestamps_file.is_none() || cli.refine_timestamps {
+        // Always extract audio waveform for further refinement
+        println!("Extracting audio waveform for refinement...");
+        let audio_data = audio::extract_audio_waveform(input_file)?;
+        
+        // Refine segments using audio analysis
+        println!("Refining song boundaries using audio analysis...");
+        segments = refine_segments_with_audio_analysis(&segments, &audio_data, video_info.duration)?;
         println!("Found {} segments", segments.len());
 
         // Create song timestamps and output JSON file
@@ -207,6 +207,90 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Audio splitting complete!");
     Ok(())
+}
+
+fn refine_segments_with_audio_analysis(
+    segments: &[audio::AudioSegment],
+    audio_data: &[f32],
+    total_duration: f64,
+) -> Result<Vec<audio::AudioSegment>, Box<dyn std::error::Error>> {
+    println!("Refining song boundaries using audio analysis...");
+    
+    // Calculate energy profile from audio data
+    let energy_profile = audio::calculate_energy_profile(audio_data);
+    
+    // Adaptive threshold calculation (similar to analyze_audio)
+    let mean_energy: f64 = energy_profile.iter().sum::<f64>() / energy_profile.len() as f64;
+    let adaptive_threshold = mean_energy * 0.25; // 25% of mean energy
+    let threshold = adaptive_threshold
+        .min(audio::ENERGY_THRESHOLD)
+        .max(audio::ENERGY_THRESHOLD * 0.1);
+    
+    println!("Using energy threshold for refinement: {:.6}", threshold);
+    
+    // Find all silence points
+    let silence_points = audio::find_silence_points(&energy_profile, threshold);
+    
+    // Convert silence points to timestamps
+    let frames_per_second = audio::SAMPLE_RATE as f64 / audio::HOP_SIZE as f64;
+    let silence_timestamps: Vec<f64> = silence_points.iter()
+        .map(|&point| point as f64 / frames_per_second)
+        .collect();
+    
+    println!("Found {} potential silence points for refinement", silence_timestamps.len());
+    
+    // Create refined segments
+    let mut refined_segments = Vec::new();
+    let look_back_seconds = 3.0; // Look back this many seconds from detected start time
+    
+    for (i, segment) in segments.iter().enumerate() {
+        if i == 0 || !segment.is_song {
+            // Keep the first segment and non-song segments as they are
+            refined_segments.push(segment.clone());
+            continue;
+        }
+        
+        let song_start = segment.start_time;
+        let search_start = (song_start - look_back_seconds).max(0.0);
+        
+        // Find silence points within the look-back window
+        let nearby_silence: Vec<f64> = silence_timestamps.iter()
+            .filter(|&&ts| ts >= search_start && ts < song_start)
+            .cloned()
+            .collect();
+        
+        if !nearby_silence.is_empty() {
+            // Find the latest silence point before the current start time
+            let new_start = *nearby_silence.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap();
+            
+            println!(
+                "Refined song {} start time from {:.2}s to {:.2}s (-{:.2}s)",
+                i, song_start, new_start, song_start - new_start
+            );
+            
+            // Update the previous segment's end time if it exists and is a song
+            if i > 0 && refined_segments[i-1].is_song {
+                refined_segments[i-1].end_time = new_start;
+            }
+            
+            // Add refined segment
+            refined_segments.push(audio::AudioSegment {
+                start_time: new_start,
+                end_time: segment.end_time,
+                is_song: true,
+            });
+        } else {
+            // No silence found in the look-back window, keep original
+            refined_segments.push(segment.clone());
+        }
+    }
+    
+    // Ensure the last segment ends at the total duration
+    if let Some(last) = refined_segments.last_mut() {
+        last.end_time = total_duration;
+    }
+    
+    Ok(refined_segments)
 }
 
 fn create_song_timestamps(
