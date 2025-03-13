@@ -33,17 +33,27 @@ pub fn frame_blackness(frame_data: &[u8], threshold: u8) -> f64 {
 }
 
 impl VideoInfo {
-    pub fn get_nearest_keyframes_by_time(&self, time: f64) -> (usize, Option<usize>) {
-        let mut first_frame_num = 0;
-        // TODO: Use binary search or a different data structure to speed this up
-        for (i, frame) in self.frames.iter().enumerate() {
-            if frame.timestamp >= time {
-                return (first_frame_num, Some(i));
+    // ((keyframe, frame), frame, keyframe)
+    pub fn nearest_frames_by_time(&self, time: f64) -> ((usize, usize), Option<usize>, Option<usize>) {
+        let mut first_keyframe_num = 0;
+        for keyframe_index in &self.keyframe_indices {
+            let keyframe = self.frames[*keyframe_index];
+            if keyframe.timestamp >= time {
+                let mut first_frame_num = first_keyframe_num;
+                // TODO: Use binary search or a different data structure to speed this up
+                for (i, frame) in self.frames[first_keyframe_num..=*keyframe_index].iter().enumerate() {
+                    if frame.timestamp >= time {
+                        return ((first_keyframe_num, first_frame_num), Some(i + first_keyframe_num), Some(*keyframe_index));
+                    } else {
+                        first_frame_num = i + first_keyframe_num;
+                    }
+                }
+                return ((first_keyframe_num, first_frame_num), None, Some(*keyframe_index));
             } else {
-                first_frame_num = i;
+                first_keyframe_num = *keyframe_index;
             }
         }
-        (first_frame_num, None)
+        ((first_keyframe_num, 0), None, None)
     }
     
     #[allow(dead_code)]

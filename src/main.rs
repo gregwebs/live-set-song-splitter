@@ -270,6 +270,9 @@ fn find_black_frame_end_time(
             "-vf", "scale=200:100",
             &format!("{}/%d.png", temp_dir),
         ])
+        // TODO: can we get rid of this particular error without just silencing stderr?
+        // [image2 @ 0x132e08570] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 928 >= 928
+        .stderr(std::process::Stdio::null())
         .status()?;
     
     if !status.success() {
@@ -817,18 +820,18 @@ fn refine_song_start_time(
         0.0
     };
 
-    // move forward to the closest keyframe
-    let (_, after_opt) = video_info.get_nearest_keyframes_by_time(initial_frame_num as f64);
+    // find an exact frame
+    let (_, after_opt, _) = video_info.nearest_frames_by_time(initial_frame_num as f64);
     let (end_fram_num, end_timestamp) = if let Some(after_key_frame) = after_opt {
         (
             after_key_frame,
             video_info.frames[after_key_frame].timestamp,
         )
     } else {
-        panic!("Could not find keyframe after initial timestamp!")
+        panic!("Could not find frame after initial timestamp!")
     };
     println!(
-        "looking back from keyframe {} after {}",
+        "looking back from frame {} after {}",
         end_timestamp, initial_timestamp
     );
 
@@ -857,8 +860,7 @@ fn refine_song_start_time(
         .status()?;
 
     if !status.success() {
-        println!("Failed to extract refined frames");
-        return Ok(0.0);
+        return Err("Failed to extract refined frames".into());
     }
 
     // Read the refined frames and analyze them
@@ -948,8 +950,8 @@ fn refine_song_start_time(
         // So go back to the previous keyframe
         // This then allows for video splitting without re-encoding
         let frame = video_info.frames[earliest_frame_num];
-        let (before, __) = video_info.get_nearest_keyframes_by_time(frame.timestamp);
-        let new_time = video_info.frames[before].timestamp;
+        let ((_, before_frame), _, _) = video_info.nearest_frames_by_time(frame.timestamp);
+        let new_time = video_info.frames[before_frame].timestamp;
         /*
         if earliest_frame_num > 1 {
             earliest_frame_num -= 1;
@@ -1038,9 +1040,3 @@ fn extract_segment(
 
     Ok(())
 }
-
-// MP4Box -udta TRACKID:type=name:str="Name of My Track" file.mp4
-// MP4Box -udta 3:type=name -udta 3:type=name:str="Director Commentary" file.mp4
-// -time [tkID=]DAY/MONTH/YEAR-H:M:S: set movie or track creation time
-// -mtime tkID=DAY/MONTH/YEAR-H:M:S: set media creation time
-// tags: -tags name=value:tag2=value https://wiki.gpac.io/MP4Box/mp4box-other-opts/#tagging-support
