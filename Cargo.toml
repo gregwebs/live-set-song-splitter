@@ -33,6 +33,7 @@ ffmpeg-next = "7.1.0"
 # File system operations
 tempfile = "3.8"        # For better temporary file handling
 stringmetrics = "2.2.2"
+image = "0.24"         # Image processing library
 
 # Optional: for more advanced audio processing
 # Note: these are optional and can be added if needed

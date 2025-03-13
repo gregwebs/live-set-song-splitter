@@ -167,6 +167,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Refining song boundaries using audio analysis...");
         segments = refine_segments_with_audio_analysis(&segments, &audio_data, video_info.duration)?;
         println!("Found {} segments", segments.len());
+        
+        // Refine the end time of the last song using black frame detection
+        segments = refine_last_song_end_time(&input_file, segments, video_info.duration)?;
 
         // Create song timestamps and output JSON file
         let song_timestamps = create_song_timestamps(&segments, &setlist.set_list);
@@ -207,6 +210,122 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Audio splitting complete!");
     Ok(())
+}
+
+fn refine_last_song_end_time(
+    input_file: &str,
+    segments: Vec<audio::AudioSegment>,
+    total_duration: f64,
+) -> Result<Vec<audio::AudioSegment>, Box<dyn std::error::Error>> {
+    // Find the last song segment
+    let mut refined_segments = segments;
+    if let Some(last_idx) = refined_segments.iter().rposition(|seg| seg.is_song) {
+        println!("Finding precise end time for the last song...");
+        
+        // Get the current end time of the last song
+        let current_end = refined_segments[last_idx].end_time;
+        
+        // Try to find a black frame to use as the end time
+        if let Some(black_frame_time) = find_black_frame_end_time(input_file, total_duration)? {
+            println!(
+                "Adjusted last song end time from {:.2}s to {:.2}s (found black frame)",
+                current_end, black_frame_time
+            );
+            refined_segments[last_idx].end_time = black_frame_time;
+        }
+    }
+    
+    Ok(refined_segments)
+}
+
+fn find_black_frame_end_time(
+    input_file: &str,
+    total_duration: f64,
+) -> Result<Option<f64>, Box<dyn std::error::Error>> {
+    println!("Looking for black frames to determine end of last song...");
+    
+    // Define the search window (last 40 seconds)
+    let search_duration = 40.0;
+    let search_start = (total_duration - search_duration).max(0.0);
+    
+    // Create a temporary directory for frames
+    let temp_dir = "temp_frames/end_frames";
+    overwrite_dir(temp_dir)?;
+    
+    // Extract frames at full framerate for the last 40 seconds
+    let status = ffmpeg::create_ffmpeg_command()
+        .args(&[
+            "-ss",
+            &format!("{}", search_start),
+            "-to", 
+            &format!("{}", total_duration),
+            "-i",
+            input_file,
+            "-c:v",
+            "png",
+            "-frame_pts",
+            "1",
+            "-fps_mode",
+            "passthrough", // Use original timestamps
+            "-qscale:v",
+            "31", // Quality setting
+            &format!("{}/%d.png", temp_dir),
+        ])
+        .status()?;
+    
+    if !status.success() {
+        return Err("Failed to extract end frames".into());
+    }
+    
+    // Get list of extracted frames
+    let mut frames = fs::read_dir(temp_dir)?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().map_or(false, |ext| ext == "png"))
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    
+    println!("Extracted {} frames for end detection", frames.len());
+    
+    // Sort frames by frame number
+    frames.sort_by(|a, b| {
+        frame_number_from_image_filename(a).cmp(&frame_number_from_image_filename(b))
+    });
+    
+    // Analyze frames to find black frame
+    let mut black_frame_time = None;
+    let threshold = 25; // Pixel brightness threshold (0-255)
+    
+    for frame_path in frames {
+        // Parse frame number to get timestamp
+        let frame_num = frame_number_from_image_filename(&frame_path);
+        let frame_time = search_start + (frame_num as f64 / 30.0); // Approximate timestamp
+        
+        // Open image and check if it's black
+        match image::open(&frame_path) {
+            Ok(img) => {
+                // Convert to grayscale and analyze pixels
+                // let gray_img = img.to_luma8();
+                let pixel_data = img.as_rgb8().unwrap().as_raw();
+                let dark_ratio = video::frame_blackness(pixel_data, threshold);
+                println!("frame {} dark ratio: {:.2}", frame_num, dark_ratio);
+                
+                // Check if most pixels are black
+                if dark_ratio > 0.90 {
+                    println!("Found black frame at {:.2}s (frame {})", frame_time, frame_num);
+                    black_frame_time = Some(frame_time);
+                    break;
+                }
+            },
+            Err(e) => {
+                println!("Error analyzing frame: {}", e);
+                continue;
+            }
+        }
+    }
+    
+    // Clean up temporary files
+    // fs::remove_dir_all(temp_dir)
+    Ok(black_frame_time)
 }
 
 fn refine_segments_with_audio_analysis(
