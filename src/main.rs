@@ -60,6 +60,9 @@ impl SetMetaData {
 
     fn folder_name(&self) -> String {
         self.album.as_ref().unwrap_or(&self.artist).to_string()
+            .replace(" : ", " - ")
+            .replace(": ", " - ")
+            .replace(":", "-")
     }
 }
 
