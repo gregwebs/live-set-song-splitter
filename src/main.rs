@@ -267,8 +267,7 @@ fn find_black_frame_end_time(
             "1",
             "-fps_mode",
             "passthrough", // Use original timestamps
-            "-qscale:v",
-            "31", // Quality setting
+            "-vf", "scale=200:100",
             &format!("{}/%d.png", temp_dir),
         ])
         .status()?;
@@ -307,10 +306,9 @@ fn find_black_frame_end_time(
                 // let gray_img = img.to_luma8();
                 let pixel_data = img.as_rgb8().unwrap().as_raw();
                 let dark_ratio = video::frame_blackness(pixel_data, threshold);
-                println!("frame {} dark ratio: {:.2}", frame_num, dark_ratio);
                 
                 // Check if most pixels are black
-                if dark_ratio > 0.90 {
+                if dark_ratio > 0.80 {
                     println!("Found black frame at {:.2}s (frame {})", frame_time, frame_num);
                     black_frame_time = Some(frame_time);
                     break;
@@ -718,7 +716,7 @@ fn match_song_titles(
     };
 
     if *overlay {
-        println!("Frame {}: Detected overlay: '{}'", frame_num, filtered_text);
+        println!("Frame {}: Detected overlay: '{}...'", frame_num, filtered_text.split("\n").next().unwrap());
     } else {
         /*
         println!("Frame {}: Detected text: '{}'", frame_num, filtered_text);
