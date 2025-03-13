@@ -627,7 +627,7 @@ fn detect_song_boundaries_from_text(
             let parsed =
                 ocr::run_tesseract_ocr_parse(frame_path.to_str().unwrap(), &artist_cmp, psm)?;
 
-            if let Some(lo @ (_, overlay)) = parsed {
+            if let Some(lo ) = parsed {
                 let title_time = match_song_titles(
                     input_file,
                     temp_dir,
@@ -642,14 +642,7 @@ fn detect_song_boundaries_from_text(
                     song_title_matched.insert(time_match.0.clone());
                     song_start_times.push(time_match);
                     break; // Found a match, no need to try other PSM options
-                } else if !overlay {
-                    // If no text overlay was detected, no point in trying other PSM options
-                    break;
                 }
-                // If we found text overlay but no title match, continue to next PSM option
-            } else {
-                // If no text was detected at all, no point in trying other PSM options
-                break;
             }
         }
     }

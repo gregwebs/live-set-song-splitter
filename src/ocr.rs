@@ -21,14 +21,16 @@ pub fn run_tesseract_ocr(
     image_path: &str,
     psm: Option<&str>,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    let mut output_path = image_path.to_string();
     // Run tesseract OCR on the image
     let mut cmd = Command::new("tesseract");
-    cmd.arg(image_path).arg(image_path);
 
     // Add PSM option if specified
     if let Some(psm_value) = psm {
         cmd.args(&["--psm", psm_value]);
+        output_path = format!("{}_psm{}", output_path, psm_value);
     }
+    cmd.arg(image_path).arg(&output_path);
 
     let output = cmd
         .stderr(std::process::Stdio::piped())
@@ -41,7 +43,7 @@ pub fn run_tesseract_ocr(
     }
 
     // Read the OCR result from the output text file
-    let out_txt_path = format!("{}.txt", image_path);
+    let out_txt_path = format!("{}.txt", &output_path);
     let text = fs::read_to_string(&out_txt_path)?;
 
     Ok(text)
@@ -99,6 +101,7 @@ mod tests {
     #[test]
     fn test_exact_match() {
         assert!(fuzzy_match_artist("John Doe", "John Doe"));
+        assert!(fuzzy_match_artist("John Doe:", "John Doe"));
     }
 
     #[test]
