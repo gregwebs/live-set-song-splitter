@@ -10,7 +10,6 @@
 
 ## Code Style Guidelines
 - **Rust**: Use standard Rust formatting (`cargo fmt`)
-- **Python**: Follow PEP 8 conventions
 - **Naming**: snake_case for variables/functions, CamelCase for types
 - **Error Handling**: Use Result/Option in Rust, try/except in Python
 - **Documentation**: Document functions with comments explaining purpose
