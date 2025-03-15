@@ -26,36 +26,53 @@ pub fn frame_blackness(frame_data: &[u8], threshold: u8) -> f64 {
     if pixel_count == 0 {
         return 0.0;
     }
-    
+
     // Count dark pixels
-    let dark_pixels = frame_data.iter().filter(|&&pixel| pixel <= threshold).count();
+    let dark_pixels = frame_data
+        .iter()
+        .filter(|&&pixel| pixel <= threshold)
+        .count();
     return dark_pixels as f64 / pixel_count as f64;
 }
 
 impl VideoInfo {
     // ((keyframe, frame), frame, keyframe)
-    pub fn nearest_frames_by_time(&self, time: f64) -> ((usize, usize), Option<usize>, Option<usize>) {
+    pub fn nearest_frames_by_time(
+        &self,
+        time: f64,
+    ) -> ((usize, usize), Option<usize>, Option<usize>) {
         let mut first_keyframe_num = 0;
         for keyframe_index in &self.keyframe_indices {
             let keyframe = self.frames[*keyframe_index];
             if keyframe.timestamp >= time {
                 let mut first_frame_num = first_keyframe_num;
                 // TODO: Use binary search or a different data structure to speed this up
-                for (i, frame) in self.frames[first_keyframe_num..=*keyframe_index].iter().enumerate() {
+                for (i, frame) in self.frames[first_keyframe_num..=*keyframe_index]
+                    .iter()
+                    .enumerate()
+                {
                     if frame.timestamp >= time {
-                        return ((first_keyframe_num, first_frame_num), Some(i + first_keyframe_num), Some(*keyframe_index));
+                        return (
+                            (first_keyframe_num, first_frame_num),
+                            Some(i + first_keyframe_num),
+                            Some(*keyframe_index),
+                        );
                     } else {
                         first_frame_num = i + first_keyframe_num;
                     }
                 }
-                return ((first_keyframe_num, first_frame_num), None, Some(*keyframe_index));
+                return (
+                    (first_keyframe_num, first_frame_num),
+                    None,
+                    Some(*keyframe_index),
+                );
             } else {
                 first_keyframe_num = *keyframe_index;
             }
         }
         ((first_keyframe_num, 0), None, None)
     }
-    
+
     #[allow(dead_code)]
     fn get_keyframe_absolute_framenum(&self, frame_num: usize) -> usize {
         // If we have keyframe indices, map the frame number to the correct keyframe

@@ -10,11 +10,29 @@ use crate::io::{overwrite_dir, sanitize_filename};
 mod video;
 use crate::video::VideoInfo;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::BufReader;
+
+/// Output format for extracted segments
+#[derive(Parser, Debug, Clone, Copy, ValueEnum)]
+#[clap(rename_all = "lowercase")]
+enum OutputFormat {
+    /// Output video files (mp4)
+    Video,
+    /// Output audio files (m4a)
+    Audio,
+    /// Output both video and audio files
+    Both,
+}
+
+impl Default for OutputFormat {
+    fn default() -> Self {
+        OutputFormat::Both
+    }
+}
 
 /// Tool for splitting live music recordings into individual songs
 #[derive(Parser, Debug)]
@@ -36,6 +54,10 @@ struct Cli {
 
     #[arg(long)]
     refine_timestamps: bool,
+
+    /// Output format: video, audio, or both
+    #[arg(long, value_enum, default_value_t = OutputFormat::Both)]
+    output_format: OutputFormat,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -59,7 +81,10 @@ impl SetMetaData {
     }
 
     fn folder_name(&self) -> String {
-        self.album.as_ref().unwrap_or(&self.artist).to_string()
+        self.album
+            .as_ref()
+            .unwrap_or(&self.artist)
+            .to_string()
             .replace(" : ", " - ")
             .replace(": ", " - ")
             .replace(":", "-")
@@ -165,12 +190,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Always extract audio waveform for further refinement
         println!("Extracting audio waveform for refinement...");
         let audio_data = audio::extract_audio_waveform(input_file)?;
-        
+
         // Refine segments using audio analysis
         println!("Refining song boundaries using audio analysis...");
-        segments = refine_segments_with_audio_analysis(&segments, &audio_data, video_info.duration)?;
+        segments =
+            refine_segments_with_audio_analysis(&segments, &audio_data, video_info.duration)?;
         println!("Found {} segments", segments.len());
-        
+
         // Refine the end time of the last song using black frame detection
         segments = refine_last_song_end_time(&input_file, segments, video_info.duration)?;
 
@@ -208,10 +234,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !cli.no_save_songs {
         let output_dir = output_metadata.unwrap().metadata.folder_name();
         fs::create_dir_all(&output_dir)?;
-        process_segments(input_file, &segments, setlist, &output_dir)?;
+        process_segments(
+            input_file,
+            &segments,
+            setlist,
+            &output_dir,
+            cli.output_format,
+        )?;
     }
 
-    println!("Audio splitting complete!");
+    // Print completion message based on output format
+    match cli.output_format {
+        OutputFormat::Video => println!("Video splitting complete!"),
+        OutputFormat::Audio => println!("Audio extraction complete!"),
+        OutputFormat::Both => println!("Video and audio extraction complete!"),
+    }
+
     Ok(())
 }
 
@@ -224,10 +262,10 @@ fn refine_last_song_end_time(
     let mut refined_segments = segments;
     if let Some(last_idx) = refined_segments.iter().rposition(|seg| seg.is_song) {
         println!("Finding precise end time for the last song...");
-        
+
         // Get the current end time of the last song
         let current_end = refined_segments[last_idx].end_time;
-        
+
         // Try to find a black frame to use as the end time
         if let Some(black_frame_time) = find_black_frame_end_time(input_file, total_duration)? {
             println!(
@@ -237,7 +275,7 @@ fn refine_last_song_end_time(
             refined_segments[last_idx].end_time = black_frame_time;
         }
     }
-    
+
     Ok(refined_segments)
 }
 
@@ -246,21 +284,21 @@ fn find_black_frame_end_time(
     total_duration: f64,
 ) -> Result<Option<f64>, Box<dyn std::error::Error>> {
     println!("Looking for black frames to determine end of last song...");
-    
+
     // Define the search window (last 40 seconds)
     let search_duration = 40.0;
     let search_start = (total_duration - search_duration).max(0.0);
-    
+
     // Create a temporary directory for frames
     let temp_dir = "temp_frames/end_frames";
     overwrite_dir(temp_dir)?;
-    
+
     // Extract frames at full framerate for the last 40 seconds
     let status = ffmpeg::create_ffmpeg_command()
         .args(&[
             "-ss",
             &format!("{}", search_start),
-            "-to", 
+            "-to",
             &format!("{}", total_duration),
             "-i",
             input_file,
@@ -270,41 +308,42 @@ fn find_black_frame_end_time(
             "1",
             "-fps_mode",
             "passthrough", // Use original timestamps
-            "-vf", "scale=200:100",
+            "-vf",
+            "scale=200:100",
             &format!("{}/%d.png", temp_dir),
         ])
         // TODO: can we get rid of this particular error without just silencing stderr?
         // [image2 @ 0x132e08570] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 928 >= 928
         .stderr(std::process::Stdio::null())
         .status()?;
-    
+
     if !status.success() {
         return Err("Failed to extract end frames".into());
     }
-    
+
     // Get list of extracted frames
     let mut frames = fs::read_dir(temp_dir)?
         .filter_map(Result::ok)
         .filter(|entry| entry.path().extension().map_or(false, |ext| ext == "png"))
         .map(|entry| entry.path())
         .collect::<Vec<_>>();
-    
+
     println!("Extracted {} frames for end detection", frames.len());
-    
+
     // Sort frames by frame number
     frames.sort_by(|a, b| {
         frame_number_from_image_filename(a).cmp(&frame_number_from_image_filename(b))
     });
-    
+
     // Analyze frames to find black frame
     let mut black_frame_time = None;
     let threshold = 25; // Pixel brightness threshold (0-255)
-    
+
     for frame_path in frames {
         // Parse frame number to get timestamp
         let frame_num = frame_number_from_image_filename(&frame_path);
         let frame_time = search_start + (frame_num as f64 / 30.0); // Approximate timestamp
-        
+
         // Open image and check if it's black
         match image::open(&frame_path) {
             Ok(img) => {
@@ -312,21 +351,24 @@ fn find_black_frame_end_time(
                 // let gray_img = img.to_luma8();
                 let pixel_data = img.as_rgb8().unwrap().as_raw();
                 let dark_ratio = video::frame_blackness(pixel_data, threshold);
-                
+
                 // Check if most pixels are black
                 if dark_ratio > 0.80 {
-                    println!("Found black frame at {:.2}s (frame {})", frame_time, frame_num);
+                    println!(
+                        "Found black frame at {:.2}s (frame {})",
+                        frame_time, frame_num
+                    );
                     black_frame_time = Some(frame_time);
                     break;
                 }
-            },
+            }
             Err(e) => {
                 println!("Error analyzing frame: {}", e);
                 continue;
             }
         }
     }
-    
+
     // Clean up temporary files
     // fs::remove_dir_all(temp_dir)
     Ok(black_frame_time)
@@ -338,64 +380,75 @@ fn refine_segments_with_audio_analysis(
     total_duration: f64,
 ) -> Result<Vec<audio::AudioSegment>, Box<dyn std::error::Error>> {
     println!("Refining song boundaries using audio analysis...");
-    
+
     // Calculate energy profile from audio data
     let energy_profile = audio::calculate_energy_profile(audio_data);
-    
+
     // Adaptive threshold calculation (similar to analyze_audio)
     let mean_energy: f64 = energy_profile.iter().sum::<f64>() / energy_profile.len() as f64;
     let adaptive_threshold = mean_energy * 0.25; // 25% of mean energy
     let threshold = adaptive_threshold
         .min(audio::ENERGY_THRESHOLD)
         .max(audio::ENERGY_THRESHOLD * 0.1);
-    
+
     println!("Using energy threshold for refinement: {:.6}", threshold);
-    
+
     // Find all silence points
     let silence_points = audio::find_silence_points(&energy_profile, threshold);
-    
+
     // Convert silence points to timestamps
     let frames_per_second = audio::SAMPLE_RATE as f64 / audio::HOP_SIZE as f64;
-    let silence_timestamps: Vec<f64> = silence_points.iter()
+    let silence_timestamps: Vec<f64> = silence_points
+        .iter()
         .map(|&point| point as f64 / frames_per_second)
         .collect();
-    
-    println!("Found {} potential silence points for refinement", silence_timestamps.len());
-    
+
+    println!(
+        "Found {} potential silence points for refinement",
+        silence_timestamps.len()
+    );
+
     // Create refined segments
     let mut refined_segments = Vec::new();
     let look_back_seconds = 3.0; // Look back this many seconds from detected start time
-    
+
     for (i, segment) in segments.iter().enumerate() {
         if i == 0 || !segment.is_song {
             // Keep the first segment and non-song segments as they are
             refined_segments.push(segment.clone());
             continue;
         }
-        
+
         let song_start = segment.start_time;
         let search_start = (song_start - look_back_seconds).max(0.0);
-        
+
         // Find silence points within the look-back window
-        let nearby_silence: Vec<f64> = silence_timestamps.iter()
+        let nearby_silence: Vec<f64> = silence_timestamps
+            .iter()
             .filter(|&&ts| ts >= search_start && ts < song_start)
             .cloned()
             .collect();
-        
+
         if !nearby_silence.is_empty() {
             // Find the latest silence point before the current start time
-            let new_start = *nearby_silence.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap();
-            
+            let new_start = *nearby_silence
+                .iter()
+                .max_by(|a, b| a.partial_cmp(b).unwrap())
+                .unwrap();
+
             println!(
                 "Refined song {} start time from {:.2}s to {:.2}s (-{:.2}s)",
-                i, song_start, new_start, song_start - new_start
+                i,
+                song_start,
+                new_start,
+                song_start - new_start
             );
-            
+
             // Update the previous segment's end time if it exists and is a song
-            if i > 0 && refined_segments[i-1].is_song {
-                refined_segments[i-1].end_time = new_start;
+            if i > 0 && refined_segments[i - 1].is_song {
+                refined_segments[i - 1].end_time = new_start;
             }
-            
+
             // Add refined segment
             refined_segments.push(audio::AudioSegment {
                 start_time: new_start,
@@ -407,12 +460,12 @@ fn refine_segments_with_audio_analysis(
             refined_segments.push(segment.clone());
         }
     }
-    
+
     // Ensure the last segment ends at the total duration
     if let Some(last) = refined_segments.last_mut() {
         last.end_time = total_duration;
     }
-    
+
     Ok(refined_segments)
 }
 
@@ -457,6 +510,7 @@ fn process_segments(
     segments: &[audio::AudioSegment],
     concert: SetList,
     output_dir: &str,
+    output_format: OutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let songs = concert.set_list;
     println!("Processing {} segments...", segments.len());
@@ -501,26 +555,58 @@ fn process_segments(
 
         // Create a safe filename from the song title
         let safe_title = sanitize_filename(song_title);
-        let output_file = format!("{}/{}.mp4", output_dir, safe_title);
 
-        println!(
-            "Extracting song {}: \"{}\" - {:.2}s to {:.2}s (duration: {:.2}s)",
-            song_counter,
-            song_title,
-            segment.start_time,
-            segment.end_time,
-            segment.end_time - segment.start_time
-        );
+        match output_format {
+            OutputFormat::Video | OutputFormat::Both => {
+                let output_file = format!("{}/{}.mp4", output_dir, safe_title);
 
-        extract_segment(
-            input_file,
-            &output_file,
-            segment.start_time,
-            segment.end_time,
-            Some(song_title),
-            &concert.metadata,
-            Some(song_counter), // Add song number as track metadata
-        )?;
+                println!(
+                    "Extracting video for song {}: \"{}\" - {:.2}s to {:.2}s (duration: {:.2}s)",
+                    song_counter,
+                    song_title,
+                    segment.start_time,
+                    segment.end_time,
+                    segment.end_time - segment.start_time
+                );
+
+                extract_segment(
+                    input_file,
+                    &output_file,
+                    segment.start_time,
+                    segment.end_time,
+                    Some(song_title),
+                    &concert.metadata,
+                    Some(song_counter), // Add song number as track metadata
+                )?;
+            }
+            _ => {}
+        }
+
+        match output_format {
+            OutputFormat::Audio | OutputFormat::Both => {
+                let output_file = format!("{}/{}.m4a", output_dir, safe_title);
+
+                println!(
+                    "Extracting audio for song {}: \"{}\" - {:.2}s to {:.2}s (duration: {:.2}s)",
+                    song_counter,
+                    song_title,
+                    segment.start_time,
+                    segment.end_time,
+                    segment.end_time - segment.start_time
+                );
+
+                extract_audio_segment(
+                    input_file,
+                    &output_file,
+                    segment.start_time,
+                    segment.end_time,
+                    Some(song_title),
+                    &concert.metadata,
+                    Some(song_counter), // Add song number as track metadata
+                )?;
+            }
+            _ => {}
+        }
     }
 
     println!(
@@ -630,7 +716,7 @@ fn detect_song_boundaries_from_text(
             let parsed =
                 ocr::run_tesseract_ocr_parse(frame_path.to_str().unwrap(), &artist_cmp, psm)?;
 
-            if let Some(lo ) = parsed {
+            if let Some(lo) = parsed {
                 let title_time = match_song_titles(
                     input_file,
                     temp_dir,
@@ -715,7 +801,11 @@ fn match_song_titles(
     };
 
     if *overlay {
-        println!("Frame {}: Detected overlay: '{}...'", frame_num, filtered_text.split("\n").next().unwrap());
+        println!(
+            "Frame {}: Detected overlay: '{}...'",
+            frame_num,
+            filtered_text.split("\n").next().unwrap()
+        );
     } else {
         /*
         println!("Frame {}: Detected text: '{}'", frame_num, filtered_text);
@@ -973,6 +1063,39 @@ fn refine_song_start_time(
     }
 }
 
+// Add common metadata fields to an FFmpeg command
+fn add_metadata_to_cmd(
+    cmd: &mut std::process::Command,
+    song_title: Option<&str>,
+    concertdata: &SetMetaData,
+    track_number: Option<usize>,
+) {
+    // Add artist metadata
+    cmd.args(&["-metadata", &format!("artist={}", concertdata.artist)]);
+
+    // Add title metadata if available
+    if let Some(title) = song_title {
+        cmd.args(&["-metadata", &format!("title={}", title)]);
+    }
+
+    // Add album metadata if available
+    if let Some(ref album) = concertdata.album {
+        cmd.args(&["-metadata", &format!("album={}", album)]);
+    }
+
+    // Add year metadata if available
+    if let Some(year_value) = concertdata.year() {
+        if !year_value.is_empty() {
+            cmd.args(&["-metadata", &format!("date={}", year_value)]);
+        }
+    }
+
+    // Add track number metadata if available
+    if let Some(track) = track_number {
+        cmd.args(&["-metadata", &format!("track={}", track)]);
+    }
+}
+
 // This is really slow because it re-encodes
 // If we just want audio we should be able to avoid re-encoding
 // For video we can't do precision splitting without re-encoding.
@@ -1001,27 +1124,8 @@ fn extract_segment(
         &format!("{:.3}", end_time),
     ]);
 
-    cmd.args(&["-metadata", &format!("artist={}", concertdata.artist)]);
-
-    // Add metadata if available
-    if let Some(title) = song_title {
-        cmd.args(&["-metadata", &format!("title={}", title)]);
-    }
-
-    if let Some(ref album) = concertdata.album {
-        cmd.args(&["-metadata", &format!("album={}", album)]);
-    }
-
-    if let Some(year_value) = concertdata.year() {
-        if !year_value.is_empty() {
-            cmd.args(&["-metadata", &format!("date={}", year_value)]);
-        }
-    }
-
-    // Add track number metadata
-    if let Some(track) = track_number {
-        cmd.args(&["-metadata", &format!("track={}", track)]);
-    }
+    // Add metadata
+    add_metadata_to_cmd(&mut cmd, song_title, concertdata, track_number);
 
     cmd.args(&[
         "-y", // Overwrite output file
@@ -1032,6 +1136,49 @@ fn extract_segment(
 
     if !status.success() {
         return Err(format!("Failed to extract segment to {}", output_file).into());
+    }
+
+    Ok(())
+}
+
+// Extract audio-only segment using stream copy (no re-encoding)
+fn extract_audio_segment(
+    input_file: &str,
+    output_file: &str,
+    start_time: f64,
+    end_time: f64,
+    song_title: Option<&str>,
+    concertdata: &SetMetaData,
+    track_number: Option<usize>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut cmd = ffmpeg::create_ffmpeg_command();
+
+    cmd.args(&[
+        "-i",
+        input_file,
+        "-vn", // No video
+        "-acodec",
+        "copy", // Copy audio stream without re-encoding
+        "-map",
+        "0:a",
+        "-ss",
+        &format!("{:.3}", start_time),
+        "-to",
+        &format!("{:.3}", end_time),
+    ]);
+
+    // Add metadata
+    add_metadata_to_cmd(&mut cmd, song_title, concertdata, track_number);
+
+    cmd.args(&[
+        "-y", // Overwrite output file
+        output_file,
+    ]);
+
+    let status = cmd.status()?;
+
+    if !status.success() {
+        return Err(format!("Failed to extract audio segment to {}", output_file).into());
     }
 
     Ok(())
