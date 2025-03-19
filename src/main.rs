@@ -598,18 +598,19 @@ fn process_segments(
         // Create a safe filename from the song title
         let safe_title = sanitize_filename(song_title);
 
+        println!(
+            "Extracting {:#?} for song {}: \"{}\" - {:.2}s to {:.2}s (duration: {:.2}s)",
+            &output_format,
+            song_counter,
+            song_title,
+            segment.start_time,
+            segment.end_time,
+            segment.end_time - segment.start_time
+        );
+
         match output_format {
             OutputFormat::Video | OutputFormat::Both => {
                 let output_file = format!("{}/{}.mp4", output_dir, safe_title);
-
-                println!(
-                    "Extracting video for song {}: \"{}\" - {:.2}s to {:.2}s (duration: {:.2}s)",
-                    song_counter,
-                    song_title,
-                    segment.start_time,
-                    segment.end_time,
-                    segment.end_time - segment.start_time
-                );
 
                 extract_segment(
                     input_file,
@@ -627,15 +628,6 @@ fn process_segments(
         match output_format {
             OutputFormat::Audio | OutputFormat::Both => {
                 let output_file = format!("{}/{}.m4a", output_dir, safe_title);
-
-                println!(
-                    "Extracting audio for song {}: \"{}\" - {:.2}s to {:.2}s (duration: {:.2}s)",
-                    song_counter,
-                    song_title,
-                    segment.start_time,
-                    segment.end_time,
-                    segment.end_time - segment.start_time
-                );
 
                 extract_audio_segment(
                     input_file,
@@ -736,9 +728,17 @@ fn detect_song_boundaries_from_text(
     frames.sort_by(|a, b| {
         frame_number_from_image_filename(a).cmp(&frame_number_from_image_filename(b))
     });
-    for frame_path in frames {
+    for mut frame_path in frames {
         // Extract frame number to calculate timestamp
         let frame_num = frame_number_from_image_filename(&frame_path);
+
+        if song_start_times.len() > 0 {
+            let (_, last_start_time) = song_start_times[song_start_times.len() - 1];
+            // A song must be at least 30 seconds
+            if (frame_num as f64) - last_start_time < 30.0 {
+                continue;
+            }
+        }
 
         let song_titles_to_match = &sorted_songs
             .iter()
@@ -749,35 +749,61 @@ fn detect_song_boundaries_from_text(
             .cloned()
             .collect::<Vec<_>>();
 
-        // Define an iterator for different PSM options
-        let psm_options = [Some("11"), None, Some("6")].iter();
-
-        // Iterate through PSM options until we find a match
-        for &psm in psm_options {
-            // Run tesseract OCR on the frame with current PSM option
-            let parsed =
-                ocr::run_tesseract_ocr_parse(frame_path.to_str().unwrap(), &artist_cmp, psm)?;
-
-            if let Some(lo) = parsed {
-                let title_time = match_song_titles(
-                    input_file,
-                    temp_dir,
-                    &lo,
-                    song_titles_to_match,
-                    &artist_cmp,
-                    frame_num,
-                    video_info,
-                )?;
-
-                if let Some(time_match) = title_time {
-                    song_title_matched.insert(time_match.0.clone());
-                    song_start_times.push(time_match);
-                    break; // Found a match, no need to try other PSM options
+        for convert in [false, true] {
+            if convert {
+                let orig_path = frame_path.clone();
+                // let mut bw_path = frame_path.clone();
+                frame_path.set_file_name(format!("{}bw.png", frame_num));
+                let mut cmd = std::process::Command::new("convert");
+                cmd.arg(orig_path.to_str().unwrap());
+                cmd.args(vec![
+                    "-colorspace",
+                    "gray",
+                    "-channel",
+                    "rgb",
+                    "-threshold",
+                    "65%",
+                    "+channel",
+                ]);
+                cmd.arg(&frame_path);
+                let status = cmd.status()?;
+                if !status.success() {
+                    return Err(anyhow::anyhow!("Failed to convert to black and white"));
                 }
+            }
+            let frame_path_str = frame_path.to_str().unwrap();
+            // Define an iterator for different PSM options
+            let psm_options = [Some("11"), None, Some("6")].iter();
+
+            // Iterate through PSM options until we find a match
+            for &psm in psm_options {
+                // Run tesseract OCR on the frame with current PSM option
+                let parsed = ocr::run_tesseract_ocr_parse(frame_path_str, &artist_cmp, psm)?;
+
+                if let Some(lo) = parsed {
+                    let title_time = match_song_titles(
+                        input_file,
+                        temp_dir,
+                        &lo,
+                        song_titles_to_match,
+                        &artist_cmp,
+                        frame_num,
+                        video_info,
+                    )?;
+
+                    if let Some(time_match) = title_time {
+                        song_title_matched.insert(time_match.0.clone());
+                        song_start_times.push(time_match);
+                        break; // Found a match, no need to try other PSM options
+                    }
+                }
+            }
+            if song_start_times.len() == songs.len() {
+                break;
             }
         }
         if song_start_times.len() == songs.len() {
-            break
+            break;
         }
     }
 
