@@ -1,6 +1,7 @@
 use std::fs::{self};
 use std::process::Command;
 
+use anyhow::{Context, Result};
 use stringmetrics::{levenshtein_weight, LevWeights};
 
 pub type OcrParse = (Vec<String>, bool);
@@ -9,7 +10,7 @@ pub fn run_tesseract_ocr_parse(
     image_path: &str,
     artist_cmp: &str,
     psm: Option<&str>,
-) -> Result<Option<OcrParse>, Box<dyn std::error::Error>> {
+) -> Result<Option<OcrParse>> {
     let text = run_tesseract_ocr(image_path, psm)?;
     return match parse_tesseract_output(&text, &artist_cmp) {
         Some(result) => Ok(Some(result)),
@@ -20,7 +21,7 @@ pub fn run_tesseract_ocr_parse(
 pub fn run_tesseract_ocr(
     image_path: &str,
     psm: Option<&str>,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> Result<String> {
     let mut output_path = image_path.to_string();
     // Run tesseract OCR on the image
     let mut cmd = Command::new("tesseract");
@@ -39,12 +40,13 @@ pub fn run_tesseract_ocr(
 
     if !output.status.success() {
         let error_message = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Tesseract OCR failed: {}", error_message).into());
+        return Err(anyhow::anyhow!("Tesseract OCR failed: {}", error_message));
     }
 
     // Read the OCR result from the output text file
     let out_txt_path = format!("{}.txt", &output_path);
-    let text = fs::read_to_string(&out_txt_path)?;
+    let text = fs::read_to_string(&out_txt_path)
+        .with_context(|| format!("Failed to read OCR output file: {}", out_txt_path))?;
 
     Ok(text)
 }

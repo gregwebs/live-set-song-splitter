@@ -1,4 +1,5 @@
 use crate::ffmpeg::create_ffprobe_command;
+use anyhow::{Context, Result};
 
 #[derive(Debug, Clone, Copy)]
 pub struct FrameInfo {
@@ -74,27 +75,27 @@ impl VideoInfo {
     }
 
     #[allow(dead_code)]
-    fn get_keyframe_absolute_framenum(&self, frame_num: usize) -> usize {
+    fn get_keyframe_absolute_framenum(&self, frame_num: usize) -> Result<usize> {
         // If we have keyframe indices, map the frame number to the correct keyframe
         if self.keyframe_indices.is_empty() || self.frames.is_empty() {
-            panic!("Keyframe indices and frames must be populated");
+            return Err(anyhow::anyhow!("Keyframe indices and frames must be populated"));
         }
         // Frame numbers are 1-indexed in our extraction, but array is 0-indexed
         let index = if frame_num > 0 { frame_num - 1 } else { 0 };
 
         // Check if this index happens to be in our keyframes list
         if index > self.keyframe_indices.len() {
-            panic!(
+            return Err(anyhow::anyhow!(
                 "Frame index {} is out of bounds for keyframe indices",
                 index
-            )
+            ))
         }
-        return self.keyframe_indices[index];
+        Ok(self.keyframe_indices[index])
     }
 
     #[allow(dead_code)]
-    fn get_keyframe(&self, frame_num: usize) -> FrameInfo {
-        let index = self.get_keyframe_absolute_framenum(frame_num);
+    fn get_keyframe(&self, frame_num: usize) -> Result<FrameInfo> {
+        let index = self.get_keyframe_absolute_framenum(frame_num)?;
         // If it's a direct frame match, return that timestamp
         let frame = self.frames[index];
         let is_keyframe = self.frames[index].is_keyframe;
@@ -105,12 +106,12 @@ impl VideoInfo {
         );
          */
         if !is_keyframe {
-            panic!("Frame {} is not a keyframe", frame_num);
+            return Err(anyhow::anyhow!("Frame {} is not a keyframe", frame_num));
         }
-        return frame;
+        Ok(frame)
     }
 
-    pub fn from_ffprobe_file(input_file: &str) -> Result<VideoInfo, Box<dyn std::error::Error>> {
+    pub fn from_ffprobe_file(input_file: &str) -> Result<VideoInfo> {
         println!("Analyzing video file metadata...");
 
         // Get basic video information in one call
@@ -129,7 +130,7 @@ impl VideoInfo {
             .output()?;
 
         if !basic_info_output.status.success() {
-            return Err("Failed to get video information".into());
+            return Err(anyhow::anyhow!("Failed to get video information"));
         }
 
         let info_json = String::from_utf8(basic_info_output.stdout)?;
@@ -138,8 +139,9 @@ impl VideoInfo {
         // Extract duration
         let duration = info["format"]["duration"]
             .as_str()
-            .ok_or("Missing duration")?
-            .parse::<f64>()?;
+            .ok_or_else(|| anyhow::anyhow!("Missing duration in video metadata"))?
+            .parse::<f64>()
+            .with_context(|| "Failed to parse duration as a number")?;
 
         // Extract start time
         let start_time = info["format"]["start_time"]
@@ -148,13 +150,13 @@ impl VideoInfo {
             .parse::<f64>()
             .unwrap_or(0.0);
         if start_time != 0.0 {
-            panic!("start time is not 0, this may cause issues with audio splitting.");
+            return Err(anyhow::anyhow!("Start time is not 0 (found {}), this may cause issues with audio splitting", start_time));
         }
 
         // Extract framerate
         let fps_str = info["streams"][0]["r_frame_rate"]
             .as_str()
-            .ok_or("Missing framerate")?;
+            .ok_or_else(|| anyhow::anyhow!("Missing framerate in video metadata"))?;
         let mut fps: u32 = 24; // Default fallback value
         if let Some((num, den)) = fps_str.split_once('/') {
             if let (Ok(n), Ok(d)) = (num.parse::<f64>(), den.parse::<f64>()) {

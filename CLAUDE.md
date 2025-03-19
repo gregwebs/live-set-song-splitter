@@ -9,6 +9,7 @@
 - Install with: `brew install ffmpeg` (macOS) or `apt install ffmpeg` (Ubuntu)
 
 ## Code Style Guidelines
+- **DRY**: Avoid code duplication. Use variables, functions, and modules to share code
 - **Rust**: Use standard Rust formatting (`cargo fmt`)
 - **Naming**: snake_case for variables/functions, CamelCase for types
 - **Error Handling**: Use Result/Option in Rust, try/except in Python
@@ -16,7 +17,6 @@
 - **Types**: Use strong typing where possible (type annotations in Python)
 - **Imports**: Group standard library, external crates/packages, then local modules
 - **Constants**: Define thresholds and parameters as named constants
-- **DRY**: Avoid code duplication, use functions and modules to share code
 
 ## Project Structure
 - `src/main.rs`: Rust implementation

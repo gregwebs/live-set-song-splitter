@@ -1,5 +1,7 @@
 use std::process::Command;
 
+use anyhow::Result;
+
 // these ones worked okay
 // pub const BLACK_AND_WHITE: &str = "hue=s=0";
 pub const BLACK_AND_WHITE: &str = "format=gray,maskfun=low=128:high=128:fill=0:sum=128";
@@ -22,7 +24,7 @@ fn _extract_segment_mp4box(
     output_file: &str,
     start_time: f64,
     end_time: f64,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     // let duration = end_time - start_time;
 
     // Use MP4Box for segment extraction
@@ -37,7 +39,7 @@ fn _extract_segment_mp4box(
         .status()?;
 
     if !status.success() {
-        return Err(format!("Failed to extract segment to {}", output_file).into());
+        return Err(anyhow::anyhow!("Failed to extract segment to {}", output_file));
     }
 
     Ok(())

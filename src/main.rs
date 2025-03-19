@@ -10,6 +10,7 @@ use crate::io::{overwrite_dir, sanitize_filename};
 mod video;
 use crate::video::VideoInfo;
 
+use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -114,7 +115,6 @@ struct SongTimestamp {
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Timestamps {
-    #[serde(flatten)]
     songs: Vec<SongTimestamp>,
 }
 
@@ -126,7 +126,7 @@ struct OutputMetadata {
     timestamps: Timestamps,
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<()> {
     // Parse command line arguments using clap
     let cli = Cli::parse();
 
@@ -134,9 +134,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let setlist_path = &cli.setlist_file;
 
     // Parse the JSON setlist file
-    let setlist_file = File::open(setlist_path)?;
+    let setlist_file = File::open(setlist_path)
+        .with_context(|| format!("Failed to open setlist file: {}", setlist_path))?;
     let setlist_reader = BufReader::new(setlist_file);
-    let setlist: SetList = serde_json::from_reader(setlist_reader)?;
+    let setlist: SetList = serde_json::from_reader(setlist_reader)
+        .with_context(|| format!("Failed to parse setlist JSON from {}", setlist_path))?;
 
     let num_songs = setlist.set_list.len();
 
@@ -149,7 +151,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Get all video information at once
-    let video_info = VideoInfo::from_ffprobe_file(input_file)?;
+    let video_info = VideoInfo::from_ffprobe_file(input_file)
+        .with_context(|| format!("Failed to get video information from {}", input_file))?;
     println!("Total duration: {:.2} seconds", video_info.duration);
 
     // Determine output directory path (will be used later too)
@@ -167,12 +170,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(timestamps_path) = &cli.timestamps_file {
         println!("Reading song timestamps from file: {}", timestamps_path);
         // Fall back to the old format if not found
-        let timestamps_file = File::open(timestamps_path)?;
+        let timestamps_file = File::open(timestamps_path)
+            .with_context(|| format!("Failed to open timestamps file: {}", timestamps_path))?;
         let timestamps_reader = BufReader::new(timestamps_file);
-        let timestamps_data: Timestamps = serde_json::from_reader(timestamps_reader)?;
+        let timestamps_data: Timestamps = serde_json::from_reader(timestamps_reader)
+            .with_context(|| format!("Failed to parse timestamps JSON from {}", timestamps_path))?;
 
         if timestamps_data.songs.len() == 0 {
-            panic!("timestamps file has no timestamps");
+            return Err(anyhow::anyhow!("Timestamps file has no timestamps"));
         }
         // Create segments from the timestamps
         for song in &timestamps_data.songs {
@@ -215,42 +220,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Check if text detection found enough songs
         if segments.iter().filter(|s| s.is_song).count() < num_songs {
             let msg = "Text overlay detection didn't find all songs.";
-            return Err(msg.into());
+            return Err(anyhow::anyhow!("{}", msg));
         }
     }
 
     if cli.timestamps_file.is_none() || cli.refine_timestamps {
         // Always extract audio waveform for further refinement
         println!("Extracting audio waveform for refinement...");
-        let audio_data = audio::extract_audio_waveform(input_file)?;
+        let audio_data = audio::extract_audio_waveform(input_file)
+            .with_context(|| format!("Failed to extract audio waveform from {}", input_file))?;
 
         // Refine segments using audio analysis
         println!("Refining song boundaries using audio analysis...");
         segments =
-            refine_segments_with_audio_analysis(&segments, &audio_data, video_info.duration)?;
+            refine_segments_with_audio_analysis(&segments, &audio_data, video_info.duration)
+                .with_context(|| "Failed to refine segments with audio analysis")?;
         println!("Found {} segments", segments.len());
 
         // Refine the end time of the last song using black frame detection
-        segments = refine_last_song_end_time(&input_file, segments, video_info.duration)?;
+        segments = refine_last_song_end_time(&input_file, segments, video_info.duration)
+            .with_context(|| "Failed to refine last song end time")?;
 
         // Create song timestamps and output JSON file
         let song_timestamps = create_song_timestamps(&segments, &setlist.set_list);
         // Create output directory for JSON file even if we don't save songs
-        fs::create_dir_all(&output_dir)?;
+        fs::create_dir_all(&output_dir)
+            .with_context(|| format!("Failed to create output directory: {}", output_dir))?;
 
         // Update the input setlist file with timestamps
         let mut updated_setlist = setlist.clone();
         updated_setlist.timestamps = Some(song_timestamps);
-        let json_content = serde_json::to_string_pretty(&updated_setlist)?;
+        let json_content = serde_json::to_string_pretty(&updated_setlist)
+            .with_context(|| "Failed to serialize updated setlist to JSON")?;
         let setlist_filename = std::path::Path::new(&setlist_path)
             .file_name()
-            .unwrap()
+            .ok_or_else(|| anyhow::anyhow!("Failed to extract filename from path: {}", setlist_path))?
             .to_str()
-            .unwrap();
-        std::fs::write(
-            format!("{}/{}", &output_dir, &setlist_filename),
-            json_content,
-        )?;
+            .ok_or_else(|| anyhow::anyhow!("Failed to convert filename to string: {}", setlist_path))?;
+        let setlist_output = format!("{}/{}" , &output_dir, &setlist_filename);
+        std::fs::write(&setlist_output, json_content)
+        .with_context(|| format!("Failed to write updated setlist to {}", &setlist_output))?;
         println!("Song timestamps written back to {}", setlist_path);
     }
 
@@ -291,7 +300,7 @@ fn refine_last_song_end_time(
     input_file: &str,
     segments: Vec<audio::AudioSegment>,
     total_duration: f64,
-) -> Result<Vec<audio::AudioSegment>, Box<dyn std::error::Error>> {
+) -> Result<Vec<audio::AudioSegment>> {
     // Find the last song segment
     let mut refined_segments = segments;
     if let Some(last_idx) = refined_segments.iter().rposition(|seg| seg.is_song) {
@@ -316,7 +325,7 @@ fn refine_last_song_end_time(
 fn find_black_frame_end_time(
     input_file: &str,
     total_duration: f64,
-) -> Result<Option<f64>, Box<dyn std::error::Error>> {
+) -> Result<Option<f64>> {
     println!("Looking for black frames to determine end of last song...");
 
     // Define the search window (last 40 seconds)
@@ -352,7 +361,7 @@ fn find_black_frame_end_time(
         .status()?;
 
     if !status.success() {
-        return Err("Failed to extract end frames".into());
+        return Err(anyhow::anyhow!("Failed to extract end frames"));
     }
 
     // Get list of extracted frames
@@ -412,7 +421,7 @@ fn refine_segments_with_audio_analysis(
     segments: &[audio::AudioSegment],
     audio_data: &[f32],
     total_duration: f64,
-) -> Result<Vec<audio::AudioSegment>, Box<dyn std::error::Error>> {
+) -> Result<Vec<audio::AudioSegment>> {
     println!("Refining song boundaries using audio analysis...");
 
     // Calculate energy profile from audio data
@@ -545,16 +554,15 @@ fn process_segments(
     concert: SetList,
     output_dir: &str,
     output_format: OutputFormat,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     let songs = concert.set_list;
     println!("Processing {} segments...", segments.len());
     if segments.len() > songs.len() {
-        return Err(format!(
+        return Err(anyhow::anyhow!(
             "Too many segments detected. {} segments but only {} songs provided.",
             segments.len(),
             songs.len()
-        )
-        .into());
+        ));
     }
 
     let mut song_counter = 0;
@@ -665,7 +673,7 @@ fn detect_song_boundaries_from_text(
     artist: &str,
     songs: &[Song],
     video_info: &VideoInfo,
-) -> Result<Vec<audio::AudioSegment>, Box<dyn std::error::Error>> {
+) -> Result<Vec<audio::AudioSegment>> {
     let total_duration = video_info.duration;
     let artist_cmp = artist.to_lowercase();
     // Create a temporary directory for frames
@@ -708,7 +716,7 @@ fn detect_song_boundaries_from_text(
     println!("Frames extracted every 2 seconds successfully.");
 
     if !status.success() {
-        return Err("Failed to extract frames".into());
+        return Err(anyhow::anyhow!("Failed to extract frames"));
     }
 
     // Get list of extracted frames
@@ -824,7 +832,7 @@ fn match_song_titles(
     artist_cmp: &str,
     frame_num: usize,
     video_info: &VideoInfo,
-) -> Result<Option<(String, f64)>, Box<dyn std::error::Error>> {
+) -> Result<Option<(String, f64)>> {
     let (lines, overlay) = ocr_parse;
 
     // Format text for display
@@ -895,7 +903,7 @@ fn timestamp_for_song(
     song_title: &str,
     frame_num: usize,
     video_info: &VideoInfo,
-) -> Result<f64, Box<dyn std::error::Error>> {
+) -> Result<f64> {
     // Extract additional frames around this timestamp for more accurate boundary detection
     let refined_timestamp = refine_song_start_time(
         input_file,
@@ -922,7 +930,7 @@ fn refine_song_start_time(
     song_title: &str,
     initial_frame_num: usize,
     video_info: &VideoInfo,
-) -> Result<f64, Box<dyn std::error::Error>> {
+) -> Result<f64> {
     let initial_timestamp = initial_frame_num as f64;
     println!(
         "Refining start time for '{}' (initially at {}s)...",
@@ -935,7 +943,7 @@ fn refine_song_start_time(
         initial_timestamp - (look_back_seconds as f64)
     } else {
         if initial_timestamp != 0.0 {
-            panic!("Initial timestamp is less than look back seconds and not zero!")
+            return Err(anyhow::anyhow!("Initial timestamp is less than look back seconds and not zero!"));
         }
         0.0
     };
@@ -948,7 +956,7 @@ fn refine_song_start_time(
             video_info.frames[after_key_frame].timestamp,
         )
     } else {
-        panic!("Could not find frame after initial timestamp!")
+        return Err(anyhow::anyhow!("Could not find frame after initial timestamp"));
     };
     println!(
         "looking back from frame {} after {}",
@@ -980,7 +988,7 @@ fn refine_song_start_time(
         .status()?;
 
     if !status.success() {
-        return Err("Failed to extract refined frames".into());
+        return Err(anyhow::anyhow!("Failed to extract refined frames"));
     }
 
     // Read the refined frames and analyze them
@@ -1144,7 +1152,7 @@ fn extract_segment(
     song_title: Option<&str>,
     concertdata: &SetMetaData,
     track_number: Option<usize>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     let mut cmd = ffmpeg::create_ffmpeg_command();
 
     cmd.args(&[
@@ -1169,7 +1177,7 @@ fn extract_segment(
     let status = cmd.status()?;
 
     if !status.success() {
-        return Err(format!("Failed to extract segment to {}", output_file).into());
+        return Err(anyhow::anyhow!("Failed to extract segment to {}", output_file));
     }
 
     Ok(())
@@ -1184,7 +1192,7 @@ fn extract_audio_segment(
     song_title: Option<&str>,
     concertdata: &SetMetaData,
     track_number: Option<usize>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     let mut cmd = ffmpeg::create_ffmpeg_command();
 
     cmd.args(&[
@@ -1212,7 +1220,7 @@ fn extract_audio_segment(
     let status = cmd.status()?;
 
     if !status.success() {
-        return Err(format!("Failed to extract audio segment to {}", output_file).into());
+        return Err(anyhow::anyhow!("Failed to extract audio segment to {}", output_file));
     }
 
     Ok(())

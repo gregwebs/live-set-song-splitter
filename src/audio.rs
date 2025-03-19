@@ -1,4 +1,5 @@
 use crate::ffmpeg::create_ffmpeg_command;
+use anyhow::{Context, Result};
 use std::fs::File;
 use std::io::{BufReader, Read};
 
@@ -17,7 +18,7 @@ pub struct AudioSegment {
 
 // const MAX_GAP_DURATION: f64 = 15.0; // Seconds - gaps longer than this are considered "talking" segments
 
-pub fn extract_audio_waveform(input_file: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+pub fn extract_audio_waveform(input_file: &str) -> Result<Vec<f32>> {
     // Create a temporary WAV file
     let temp_wav = "temp_audio.wav";
 
@@ -39,11 +40,12 @@ pub fn extract_audio_waveform(input_file: &str) -> Result<Vec<f32>, Box<dyn std:
         .status()?;
 
     if !status.success() {
-        return Err("Failed to extract audio to WAV".into());
+        return Err(anyhow::anyhow!("Failed to extract audio to WAV"));
     }
 
     // Read the WAV file
-    let file = File::open(temp_wav)?;
+    let file = File::open(temp_wav)
+        .with_context(|| format!("Failed to open temporary WAV file: {}", temp_wav))?;
     let mut reader = BufReader::new(file);
     let mut buffer = Vec::new();
     reader.read_to_end(&mut buffer)?;

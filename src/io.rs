@@ -1,12 +1,21 @@
 use std::fs;
-use std::io;
 use std::path::Path;
 
-pub fn overwrite_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
-    if fs::exists(&path)? {
-        fs::remove_dir_all(&path)?;
+use anyhow::{Context, Result};
+
+pub fn overwrite_dir<P: AsRef<Path>>(path: P) -> Result<()> {
+    let path_ref = path.as_ref();
+    let path_str = path_ref.to_string_lossy();
+    
+    if fs::exists(&path)
+        .with_context(|| format!("Failed to check if directory exists: {}", path_str))?
+    {
+        fs::remove_dir_all(&path)
+            .with_context(|| format!("Failed to remove existing directory: {}", path_str))?;
     }
+    
     fs::create_dir(&path)
+        .with_context(|| format!("Failed to create directory: {}", path_str))
 }
 
 pub fn sanitize_filename(input: &str) -> String {
