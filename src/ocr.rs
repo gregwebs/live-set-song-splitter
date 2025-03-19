@@ -193,8 +193,11 @@ pub fn matches_song_title_weighted(
         // Longer text is too fragile
         // If we can confidently match 15 characters, that should be enough
         // TODO: Longer titles (> 30~) get split across 2 lines, could match that better
-        if line_normalized.len() > 15 && title_normalized.len() > 15 {
-            _ = title_normalized.split_off(line_normalized.len());
+        let line_count = line_normalized.chars().count();
+        let title_count = title_normalized.chars().count();
+        if line_count > 10 && title_count > 12 {
+            let take = std::cmp::min(line_count + 2, title_count);
+            title_normalized = title_normalized.chars().take(take).collect::<String>();
         }
         let mut levenshtein_limit = levenshtein_limit;
         if line_normalized.len() > title_normalized.len() {
@@ -207,14 +210,14 @@ pub fn matches_song_title_weighted(
         let lev = levenshtein_weight(
             &line_normalized,
             &title_normalized,
-            levenshtein_limit + 10,
+            levenshtein_limit + 1 + title_count as u32,
             &weights,
         );
+        // println!("normalized title/line:\n{}\n{}", title_normalized, line_normalized);
         // println!("levenshtein distance: {}. {}. {}", lev, song_title, line);
         if lev <= levenshtein_limit {
             return Some((line.clone(), lev));
         }
-        // println!("normalized title:\n{}\nnormalized line:\n{}", title_normalized, line_normalized);
         if title_normalized.starts_with(&line_normalized) {
             // println!("normalized title contains normalized line");
             if (line_normalized.len() as f64 / title_normalized.len() as f64) >= 0.4 {
@@ -270,14 +273,17 @@ mod tests_matches_song_title {
         // Test with overlay
         assert!(matches_song_title(&lines, "hello world test", true).is_some());
 
+        // Test non-matches
+        let other_lines = vec!["completely different".to_string()];
+        assert!(!matches_song_title(&other_lines, "test song", true).is_some());
+    }
+
+    #[test]
+    fn test_matches_overlay() {
         // Test fuzzy matching (only works with overlay flag)
         let ocr_lines = vec!["helo wrld".to_string()]; // OCR might miss letters
         assert!(!matches_song_title(&ocr_lines, "hello world", false).is_some()); // Should fail without overlay
         assert!(matches_song_title(&ocr_lines, "hello world", true).is_some()); // Should pass with overlay
-
-        // Test non-matches
-        let other_lines = vec!["completely different".to_string()];
-        assert!(!matches_song_title(&other_lines, "test song", true).is_some());
     }
 
     #[test]
@@ -300,5 +306,17 @@ mod tests_matches_song_title {
             true
         )
         .is_some());
+    }
+
+    #[test]
+    fn test_not_matches_small_text() {
+        let lines = vec!["//".to_string()];
+        assert!(!matches_song_title(&lines, "too much", true).is_some());
+    }
+
+    #[test]
+    fn test_missing_beginning_and_end() {
+        let lines = vec!["ummer Depres".to_string()];
+        assert!(matches_song_title(&lines, "Summer Depression", true).is_some());
     }
 }
