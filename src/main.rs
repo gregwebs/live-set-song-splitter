@@ -232,9 +232,8 @@ fn main() -> Result<()> {
 
         // Refine segments using audio analysis
         println!("Refining song boundaries using audio analysis...");
-        segments =
-            refine_segments_with_audio_analysis(&segments, &audio_data, video_info.duration)
-                .with_context(|| "Failed to refine segments with audio analysis")?;
+        segments = refine_segments_with_audio_analysis(&segments, &audio_data, video_info.duration)
+            .with_context(|| "Failed to refine segments with audio analysis")?;
         println!("Found {} segments", segments.len());
 
         // Refine the end time of the last song using black frame detection
@@ -254,12 +253,16 @@ fn main() -> Result<()> {
             .with_context(|| "Failed to serialize updated setlist to JSON")?;
         let setlist_filename = std::path::Path::new(&setlist_path)
             .file_name()
-            .ok_or_else(|| anyhow::anyhow!("Failed to extract filename from path: {}", setlist_path))?
+            .ok_or_else(|| {
+                anyhow::anyhow!("Failed to extract filename from path: {}", setlist_path)
+            })?
             .to_str()
-            .ok_or_else(|| anyhow::anyhow!("Failed to convert filename to string: {}", setlist_path))?;
-        let setlist_output = format!("{}/{}" , &output_dir, &setlist_filename);
+            .ok_or_else(|| {
+                anyhow::anyhow!("Failed to convert filename to string: {}", setlist_path)
+            })?;
+        let setlist_output = format!("{}/{}", &output_dir, &setlist_filename);
         std::fs::write(&setlist_output, json_content)
-        .with_context(|| format!("Failed to write updated setlist to {}", &setlist_output))?;
+            .with_context(|| format!("Failed to write updated setlist to {}", &setlist_output))?;
         println!("Song timestamps written back to {}", setlist_path);
     }
 
@@ -322,10 +325,7 @@ fn refine_last_song_end_time(
     Ok(refined_segments)
 }
 
-fn find_black_frame_end_time(
-    input_file: &str,
-    total_duration: f64,
-) -> Result<Option<f64>> {
+fn find_black_frame_end_time(input_file: &str, total_duration: f64) -> Result<Option<f64>> {
     println!("Looking for black frames to determine end of last song...");
 
     // Define the search window (last 40 seconds)
@@ -666,7 +666,7 @@ fn frame_number_from_image_filename(frame_path: &std::path::PathBuf) -> usize {
         .unwrap_or(0);
 }
 
-const CROP_TO_TEXT: &str = "scale=400:200,crop=iw/1.5:ih/5:0:160";
+const CROP_TO_TEXT: &str = "scale=400:200,crop=iw/1.5:ih/4:0:160";
 
 fn detect_song_boundaries_from_text(
     input_file: &str,
@@ -690,11 +690,11 @@ fn detect_song_boundaries_from_text(
     // sorted_songs.clone_from_slice(songs);
     sorted_songs.sort_by(|a, b| a.title.len().partial_cmp(&b.title.len()).unwrap().reverse());
 
-    println!("Extracting frames every 2 seconds for song title detection...");
+    println!("Extracting frames every 1 seconds for song title detection...");
 
-    let every_2_seconds = "fps=1,select='not(mod(t,2))'";
+    let every_few_seconds = "fps=1,select='not(mod(t,1))'";
 
-    // Extract frames every 2 seconds with potential text overlays
+    // Extract frames every 1 seconds with potential text overlays
     let status = ffmpeg::create_ffmpeg_command()
         .args(&[
             "-i",
@@ -708,12 +708,12 @@ fn detect_song_boundaries_from_text(
             "-qscale:v",
             "31", // Quality setting
             "-vf",
-            &format!("{},{}", every_2_seconds, CROP_TO_TEXT), // Extract 1 frame every 2 seconds, focus on the text area
-            &format!("{}/%d.png", temp_dir),                  // Use sequential numbering
+            &format!("{},{}", every_few_seconds, CROP_TO_TEXT), // Extract 1 frame every few seconds, focus on the text area
+            &format!("{}/%d.png", temp_dir),                    // Use sequential numbering
         ])
         .status()?;
 
-    println!("Frames extracted every 2 seconds successfully.");
+    println!("Frames extracted successfully for image detection.");
 
     if !status.success() {
         return Err(anyhow::anyhow!("Failed to extract frames"));
@@ -943,7 +943,9 @@ fn refine_song_start_time(
         initial_timestamp - (look_back_seconds as f64)
     } else {
         if initial_timestamp != 0.0 {
-            return Err(anyhow::anyhow!("Initial timestamp is less than look back seconds and not zero!"));
+            return Err(anyhow::anyhow!(
+                "Initial timestamp is less than look back seconds and not zero!"
+            ));
         }
         0.0
     };
@@ -956,7 +958,9 @@ fn refine_song_start_time(
             video_info.frames[after_key_frame].timestamp,
         )
     } else {
-        return Err(anyhow::anyhow!("Could not find frame after initial timestamp"));
+        return Err(anyhow::anyhow!(
+            "Could not find frame after initial timestamp"
+        ));
     };
     println!(
         "looking back from frame {} after {}",
@@ -1177,7 +1181,10 @@ fn extract_segment(
     let status = cmd.status()?;
 
     if !status.success() {
-        return Err(anyhow::anyhow!("Failed to extract segment to {}", output_file));
+        return Err(anyhow::anyhow!(
+            "Failed to extract segment to {}",
+            output_file
+        ));
     }
 
     Ok(())
@@ -1220,7 +1227,10 @@ fn extract_audio_segment(
     let status = cmd.status()?;
 
     if !status.success() {
-        return Err(anyhow::anyhow!("Failed to extract audio segment to {}", output_file));
+        return Err(anyhow::anyhow!(
+            "Failed to extract audio segment to {}",
+            output_file
+        ));
     }
 
     Ok(())

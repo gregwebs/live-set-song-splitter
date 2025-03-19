@@ -78,7 +78,9 @@ impl VideoInfo {
     fn get_keyframe_absolute_framenum(&self, frame_num: usize) -> Result<usize> {
         // If we have keyframe indices, map the frame number to the correct keyframe
         if self.keyframe_indices.is_empty() || self.frames.is_empty() {
-            return Err(anyhow::anyhow!("Keyframe indices and frames must be populated"));
+            return Err(anyhow::anyhow!(
+                "Keyframe indices and frames must be populated"
+            ));
         }
         // Frame numbers are 1-indexed in our extraction, but array is 0-indexed
         let index = if frame_num > 0 { frame_num - 1 } else { 0 };
@@ -88,7 +90,7 @@ impl VideoInfo {
             return Err(anyhow::anyhow!(
                 "Frame index {} is out of bounds for keyframe indices",
                 index
-            ))
+            ));
         }
         Ok(self.keyframe_indices[index])
     }
@@ -150,7 +152,10 @@ impl VideoInfo {
             .parse::<f64>()
             .unwrap_or(0.0);
         if start_time != 0.0 {
-            return Err(anyhow::anyhow!("Start time is not 0 (found {}), this may cause issues with audio splitting", start_time));
+            return Err(anyhow::anyhow!(
+                "Start time is not 0 (found {}), this may cause issues with audio splitting",
+                start_time
+            ));
         }
 
         // Extract framerate
