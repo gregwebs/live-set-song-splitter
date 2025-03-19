@@ -18,10 +18,7 @@ pub fn run_tesseract_ocr_parse(
     };
 }
 
-pub fn run_tesseract_ocr(
-    image_path: &str,
-    psm: Option<&str>,
-) -> Result<String> {
+pub fn run_tesseract_ocr(image_path: &str, psm: Option<&str>) -> Result<String> {
     let mut output_path = image_path.to_string();
     // Run tesseract OCR on the image
     let mut cmd = Command::new("tesseract");
@@ -187,13 +184,20 @@ pub fn matches_song_title_weighted(
 
     for line in lines {
         let line_normalized = normalize_text(line);
+        let mut title_normalized = title_normalized.clone();
 
         // Check for exact or partial match
         if line_normalized.contains(&title_normalized) {
             return Some((line.clone(), 0));
         }
+        // Longer text is too fragile
+        // If we can confidently match 15 characters, that should be enough
+        // TODO: Longer titles (> 30~) get split across 2 lines, could match that better
+        if line_normalized.len() > 15 && title_normalized.len() > 15 {
+            _ = title_normalized.split_off(line_normalized.len());
+        }
         let mut levenshtein_limit = levenshtein_limit;
-        if line_normalized.len() > song_title.len() {
+        if line_normalized.len() > title_normalized.len() {
             levenshtein_limit = (line_normalized.len() as f64 / 3.0).floor() as u32;
         }
         if is_overlay {
@@ -210,7 +214,9 @@ pub fn matches_song_title_weighted(
         if lev <= levenshtein_limit {
             return Some((line.clone(), lev));
         }
+        // println!("normalized title:\n{}\nnormalized line:\n{}", title_normalized, line_normalized);
         if title_normalized.starts_with(&line_normalized) {
+            // println!("normalized title contains normalized line");
             if (line_normalized.len() as f64 / title_normalized.len() as f64) >= 0.4 {
                 return Some((
                     line.clone(),
@@ -272,5 +278,27 @@ mod tests_matches_song_title {
         // Test non-matches
         let other_lines = vec!["completely different".to_string()];
         assert!(!matches_song_title(&other_lines, "test song", true).is_some());
+    }
+
+    #[test]
+    fn test_matches_song_title_20_chars() {
+        let other_lines = vec!["-THUSIIS WHY (IDON'TSPRING".to_string()];
+        assert!(matches_song_title(
+            &other_lines,
+            "..THUS IS WHY ( I DON'T SPRING 4 LOVE )",
+            true
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn test_matches_song_title_15_chars() {
+        let lines = vec!["IsTHERE'S NO SEATII".to_string()];
+        assert!(matches_song_title(
+            &lines,
+            "IF THERE'S NO SEAT IN THE SKY (WILL YOU FORGIVE ME???)",
+            true
+        )
+        .is_some());
     }
 }
