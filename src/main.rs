@@ -58,6 +58,10 @@ struct Cli {
     /// Output format: video, audio, or both
     #[arg(long, value_enum, default_value_t = OutputFormat::Both)]
     output_format: OutputFormat,
+
+    /// Custom output directory for generated audio/video files
+    #[arg(long)]
+    output_dir: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -148,11 +152,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let video_info = VideoInfo::from_ffprobe_file(input_file)?;
     println!("Total duration: {:.2} seconds", video_info.duration);
 
-    let mut segments = Vec::new();
-    #[allow(unused_assignments)]
-    let mut output_metadata: Option<OutputMetadata> = None;
+    // Determine output directory path (will be used later too)
+    let folder_name = setlist.metadata.folder_name();
+    let output_dir = if let Some(custom_dir) = &cli.output_dir {
+        let dir = format!("{}/{}", custom_dir, folder_name);
+        println!("Using custom output directory: {}", dir);
+        dir
+    } else {
+        folder_name
+    };
 
     // If timestamps file is provided, read from it instead of detecting segments
+    let mut segments = Vec::new();
     if let Some(timestamps_path) = &cli.timestamps_file {
         println!("Reading song timestamps from file: {}", timestamps_path);
         // Fall back to the old format if not found
@@ -224,24 +235,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Create song timestamps and output JSON file
         let song_timestamps = create_song_timestamps(&segments, &setlist.set_list);
-
-        // Create output metadata
-        output_metadata = Some(OutputMetadata {
-            metadata: setlist.metadata.clone(),
-            timestamps: Timestamps {
-                songs: song_timestamps.clone(),
-            },
-        });
-
         // Create output directory for JSON file even if we don't save songs
-        let output_dir = setlist.metadata.folder_name();
         fs::create_dir_all(&output_dir)?;
 
         // Update the input setlist file with timestamps
         let mut updated_setlist = setlist.clone();
         updated_setlist.timestamps = Some(song_timestamps);
         let json_content = serde_json::to_string_pretty(&updated_setlist)?;
-        std::fs::write(setlist_path, json_content)?;
+        let setlist_filename = std::path::Path::new(&setlist_path)
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap();
+        std::fs::write(
+            format!("{}/{}", &output_dir, &setlist_filename),
+            json_content,
+        )?;
         println!("Song timestamps written back to {}", setlist_path);
     }
 
@@ -258,7 +267,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Process each detected segment (skip if --no-save-songs is provided)
     if !cli.no_save_songs {
-        let output_dir = output_metadata.unwrap().metadata.folder_name();
         fs::create_dir_all(&output_dir)?;
         process_segments(
             input_file,
