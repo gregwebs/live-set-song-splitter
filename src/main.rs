@@ -91,15 +91,16 @@ impl SetMetaData {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct SetList {
     #[serde(flatten)]
     metadata: SetMetaData,
     #[serde(rename = "setList")]
     set_list: Vec<Song>,
+    timestamps: Option<Vec<SongTimestamp>>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct SongTimestamp {
     title: String,
     start_time: f64,
@@ -108,10 +109,17 @@ struct SongTimestamp {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+struct Timestamps {
+    #[serde(flatten)]
+    songs: Vec<SongTimestamp>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 struct OutputMetadata {
     #[serde(flatten)]
     metadata: SetMetaData,
-    songs: Vec<SongTimestamp>,
+    #[serde(flatten)]
+    timestamps: Timestamps,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -147,10 +155,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // If timestamps file is provided, read from it instead of detecting segments
     if let Some(timestamps_path) = &cli.timestamps_file {
         println!("Reading song timestamps from file: {}", timestamps_path);
+        // Fall back to the old format if not found
         let timestamps_file = File::open(timestamps_path)?;
         let timestamps_reader = BufReader::new(timestamps_file);
-        let timestamps_data: OutputMetadata = serde_json::from_reader(timestamps_reader)?;
+        let timestamps_data: Timestamps = serde_json::from_reader(timestamps_reader)?;
 
+        if timestamps_data.songs.len() == 0 {
+            panic!("timestamps file has no timestamps");
+        }
         // Create segments from the timestamps
         for song in &timestamps_data.songs {
             segments.push(audio::AudioSegment {
@@ -160,13 +172,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         }
 
-        output_metadata = Some(timestamps_data);
-
         println!(
             "Loaded {} song segments from timestamps file",
             segments.len()
         );
-    } else {
+    } else if let Some(timestamps) = &setlist.timestamps {
+        // Create segments from the timestamps
+        for song in timestamps {
+            segments.push(audio::AudioSegment {
+                start_time: song.start_time,
+                end_time: song.end_time,
+                is_song: true,
+            });
+        }
+        println!("Loaded {} song segments from JSON file", segments.len());
+    }
+
+    if segments.len() == 0 {
         // First try to detect song boundaries using text overlays
         println!("Attempting to detect song boundaries using text overlays...");
         segments = detect_song_boundaries_from_text(
@@ -206,17 +228,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Create output metadata
         output_metadata = Some(OutputMetadata {
             metadata: setlist.metadata.clone(),
-            songs: song_timestamps,
+            timestamps: Timestamps {
+                songs: song_timestamps.clone(),
+            },
         });
 
         // Create output directory for JSON file even if we don't save songs
         let output_dir = setlist.metadata.folder_name();
         fs::create_dir_all(&output_dir)?;
-        // Write output metadata to JSON file
-        let json_file_path = format!("{}/timestamps.json", &output_dir);
-        let json_content = serde_json::to_string_pretty(output_metadata.as_ref().unwrap())?;
-        std::fs::write(&json_file_path, json_content)?;
-        println!("Song timestamps written to {}", json_file_path);
+
+        // Update the input setlist file with timestamps
+        let mut updated_setlist = setlist.clone();
+        updated_setlist.timestamps = Some(song_timestamps);
+        let json_content = serde_json::to_string_pretty(&updated_setlist)?;
+        std::fs::write(setlist_path, json_content)?;
+        println!("Song timestamps written back to {}", setlist_path);
     }
 
     for (i, segment) in segments.iter().enumerate() {

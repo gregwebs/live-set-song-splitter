@@ -1,6 +1,6 @@
-/example/
 /temp_frames/
 .DS_Store
+/output/
 
 *.mp4
 
