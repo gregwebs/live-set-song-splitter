@@ -776,6 +776,9 @@ fn detect_song_boundaries_from_text(
                 }
             }
         }
+        if song_start_times.len() == songs.len() {
+            break
+        }
     }
 
     // Sort song start times by timestamp
