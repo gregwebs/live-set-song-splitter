@@ -1,5 +1,6 @@
 use std::fs::{self};
 use std::process::Command;
+use std::fmt::{self};
 
 use anyhow::{Context, Result};
 use stringmetrics::{levenshtein_weight, LevWeights};
@@ -168,9 +169,26 @@ pub fn matches_song_title(
     lines: &[String],
     song_title: &str,
     is_overlay: bool,
-) -> Option<(String, u32)> {
+) -> Option<(MatchReason, String, u32)> {
     let weights = LevWeights::new(2, 2, 1);
     matches_song_title_weighted(lines, song_title, is_overlay, &weights)
+}
+
+#[derive(Debug)]
+pub enum MatchReason {
+    Contains,
+    StartsWith,
+    Levenshtein,
+}
+
+impl fmt::Display for MatchReason {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            MatchReason::Contains => { write!(f, "contains") },
+            MatchReason::StartsWith => { write!(f, "starts_with") },
+            MatchReason::Levenshtein => { write!(f, "levenshtein") },
+        }
+    }
 }
 
 pub fn matches_song_title_weighted(
@@ -178,7 +196,7 @@ pub fn matches_song_title_weighted(
     song_title: &str,
     is_overlay: bool,
     weights: &LevWeights,
-) -> Option<(String, u32)> {
+) -> Option<(MatchReason, String, u32)> {
     let title_normalized = normalize_text(song_title);
     let levenshtein_limit = (song_title.len() as f64 / 3.0).floor() as u32;
 
@@ -188,7 +206,7 @@ pub fn matches_song_title_weighted(
 
         // Check for exact or partial match
         if line_normalized.contains(&title_normalized) {
-            return Some((line.clone(), 0));
+            return Some((MatchReason::Contains, line.clone(), 0));
         }
         // Longer text is too fragile
         // If we can confidently match 15 characters, that should be enough
@@ -210,18 +228,21 @@ pub fn matches_song_title_weighted(
         let lev = levenshtein_weight(
             &line_normalized,
             &title_normalized,
-            levenshtein_limit + 1 + title_count as u32,
+            // It seems to stop if hitting this limit with any iteration
+            // We need a high limit so that it will backtrack and try a different approach
+            levenshtein_limit + 10 + title_count as u32,
             &weights,
         );
         // println!("normalized title/line:\n{}\n{}", title_normalized, line_normalized);
-        // println!("levenshtein distance: {}. {}. {}", lev, song_title, line);
+        // println!("levenshtein distance: {}/{}. {}. {}", lev, levenshtein_limit, song_title, line);
         if lev <= levenshtein_limit {
-            return Some((line.clone(), lev));
+            return Some((MatchReason::Levenshtein, line.clone(), lev));
         }
         if title_normalized.starts_with(&line_normalized) {
             // println!("normalized title contains normalized line");
             if (line_normalized.len() as f64 / title_normalized.len() as f64) >= 0.4 {
                 return Some((
+                    MatchReason::StartsWith,
                     line.clone(),
                     (title_normalized.len() - line_normalized.len()) as u32,
                 ));
@@ -318,5 +339,11 @@ mod tests_matches_song_title {
     fn test_missing_beginning_and_end() {
         let lines = vec!["ummer Depres".to_string()];
         assert!(matches_song_title(&lines, "Summer Depression", true).is_some());
+    }
+
+    #[test]
+    fn test_copyright() {
+        let lines = vec!["‘© Quarto (Fado Pager".to_string()];
+        assert!(matches_song_title(&lines, "O Quarto (fado Pagem)", true).is_some());
     }
 }

@@ -883,17 +883,17 @@ fn match_song_titles(
         */
     }
 
-    let mut best_match: Option<(String, (String, u32))> = None;
+    let mut best_match: Option<(String, (ocr::MatchReason, String, u32))> = None;
     for song_title in song_titles_to_match {
         match matches_song_title(&lines, song_title, *overlay) {
             None => {
                 continue;
             }
-            Some(matched @ (_, lev_dist)) => match best_match {
+            Some(matched @ (_, _, lev_dist)) => match best_match {
                 None => {
                     best_match = Some((song_title.to_string(), matched));
                 }
-                Some((_, (_, best_dist))) => {
+                Some((_, (_, _, best_dist))) => {
                     if lev_dist < best_dist {
                         best_match = Some((song_title.to_string(), matched));
                     }
@@ -903,10 +903,10 @@ fn match_song_titles(
     }
     match best_match {
         None => Ok(None),
-        Some((song_title, (line, lev_dist))) => {
+        Some((song_title, (reason, line, lev_dist))) => {
             println!(
-                "Match found! '{}' matches song '{}' frame={} dist={}",
-                line, &song_title, frame_num, lev_dist,
+                "Match found! '{}' matches song '{}' frame={} dist={} reason={}",
+                line, &song_title, frame_num, lev_dist, reason,
             );
             match timestamp_for_song(
                 input_file,
