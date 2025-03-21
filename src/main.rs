@@ -13,7 +13,7 @@ use crate::video::VideoInfo;
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::BufReader;
 
@@ -75,6 +75,12 @@ struct AudioSegment {
     pub start_time: f64,
     pub end_time: f64,
     pub is_song: bool,
+}
+
+#[derive(Clone, Debug)]
+struct SongSegment {
+    pub song: Song,
+    pub segment: AudioSegment,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -144,7 +150,7 @@ fn main() -> Result<()> {
     let setlist_file = File::open(setlist_path)
         .with_context(|| format!("Failed to open setlist file: {}", setlist_path))?;
     let setlist_reader = BufReader::new(setlist_file);
-    let setlist: SetList = serde_json::from_reader(setlist_reader)
+    let mut setlist: SetList = serde_json::from_reader(setlist_reader)
         .with_context(|| format!("Failed to parse setlist JSON from {}", setlist_path))?;
 
     let num_songs = setlist.set_list.len();
@@ -187,12 +193,16 @@ fn main() -> Result<()> {
             return Err(anyhow::anyhow!("Timestamps file has no timestamps"));
         }
         // Create segments from the timestamps
-        for song in &timestamps_data.songs {
-            segments.push(AudioSegment {
-                start_time: song.start_time,
-                end_time: song.end_time,
+        for song_timestamp in &timestamps_data.songs {
+            let song = Song {
+                title: song_timestamp.title.clone(),
+            };
+            let segment = AudioSegment {
+                start_time: song_timestamp.start_time,
+                end_time: song_timestamp.end_time,
                 is_song: true,
-            });
+            };
+            segments.push(SongSegment { song, segment });
         }
 
         println!(
@@ -201,12 +211,16 @@ fn main() -> Result<()> {
         );
     } else if let Some(timestamps) = &setlist.timestamps {
         // Create segments from the timestamps
-        for song in timestamps {
-            segments.push(AudioSegment {
-                start_time: song.start_time,
-                end_time: song.end_time,
+        for song_timestamp in timestamps {
+            let song = Song {
+                title: song_timestamp.title.clone(),
+            };
+            let segment = AudioSegment {
+                start_time: song_timestamp.start_time,
+                end_time: song_timestamp.end_time,
                 is_song: true,
-            });
+            };
+            segments.push(SongSegment { song, segment });
         }
         println!("Loaded {} song segments from JSON file", segments.len());
     }
@@ -214,20 +228,16 @@ fn main() -> Result<()> {
     if segments.len() == 0 {
         // First try to detect song boundaries using text overlays
         println!("Attempting to detect song boundaries using text overlays...");
-        segments = detect_song_boundaries_from_text(
+        // Get song segments from text detection
+        let song_segments = detect_song_boundaries_from_text(
             input_file,
             &setlist.metadata.artist,
             &setlist.set_list,
             &video_info,
         )?;
+        segments = song_segments;
         for segment in &segments {
             println!("Segment: {:?}", segment);
-        }
-
-        // Check if text detection found enough songs
-        if segments.iter().filter(|s| s.is_song).count() < num_songs {
-            let msg = "Text overlay detection didn't find all songs.";
-            return Err(anyhow::anyhow!("{}", msg));
         }
     }
 
@@ -248,20 +258,39 @@ fn main() -> Result<()> {
             .with_context(|| "Failed to refine last song end time")?;
 
         // Create song timestamps and output JSON file
-        let song_timestamps = create_song_timestamps(&segments, &setlist.set_list);
+        setlist.timestamps = Some(create_song_timestamps(&segments, &setlist.set_list));
         // Create output directory for JSON file even if we don't save songs
         fs::create_dir_all(&output_dir)
             .with_context(|| format!("Failed to create output directory: {}", output_dir))?;
+        let output_filename = std::path::Path::new(setlist_path)
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap();
+        fs::write(
+            format!("{}/{}", &output_dir, &output_filename),
+            serde_json::to_string_pretty(&setlist)?,
+        )?;
+    }
+
+    // Check if text detection found enough songs
+    if segments.iter().filter(|s| s.segment.is_song).count() < num_songs {
+        let msg = "Text overlay detection didn't find all songs.";
+        return Err(anyhow::anyhow!("{}", msg));
     }
 
     for (i, segment) in segments.iter().enumerate() {
         println!(
             "Segment {}: {:.2}s to {:.2}s ({:.2}s) - {}",
             i + 1,
-            segment.start_time,
-            segment.end_time,
-            segment.end_time - segment.start_time,
-            if segment.is_song { "SONG" } else { "gap" }
+            segment.segment.start_time,
+            segment.segment.end_time,
+            segment.segment.end_time - segment.segment.start_time,
+            if segment.segment.is_song {
+                "SONG"
+            } else {
+                "gap"
+            }
         );
     }
 
@@ -289,16 +318,16 @@ fn main() -> Result<()> {
 
 fn refine_last_song_end_time(
     input_file: &str,
-    segments: Vec<AudioSegment>,
+    segments: Vec<SongSegment>,
     total_duration: f64,
-) -> Result<Vec<AudioSegment>> {
+) -> Result<Vec<SongSegment>> {
     // Find the last song segment
     let mut refined_segments = segments;
-    if let Some(last_idx) = refined_segments.iter().rposition(|seg| seg.is_song) {
+    if let Some(last_idx) = refined_segments.iter().rposition(|seg| seg.segment.is_song) {
         println!("Finding precise end time for the last song...");
 
         // Get the current end time of the last song
-        let current_end = refined_segments[last_idx].end_time;
+        let current_end = refined_segments[last_idx].segment.end_time;
 
         // Try to find a black frame to use as the end time
         if let Some(black_frame_time) = find_black_frame_end_time(input_file, total_duration)? {
@@ -306,7 +335,7 @@ fn refine_last_song_end_time(
                 "Adjusted last song end time from {:.2}s to {:.2}s (found black frame)",
                 current_end, black_frame_time
             );
-            refined_segments[last_idx].end_time = black_frame_time;
+            refined_segments[last_idx].segment.end_time = black_frame_time;
         }
     }
 
@@ -406,10 +435,10 @@ fn find_black_frame_end_time(input_file: &str, total_duration: f64) -> Result<Op
 }
 
 fn refine_segments_with_audio_analysis(
-    segments: &[AudioSegment],
+    segments: &[SongSegment],
     audio_data: &[f32],
     total_duration: f64,
-) -> Result<Vec<AudioSegment>> {
+) -> Result<Vec<SongSegment>> {
     println!("Refining song boundaries using audio analysis...");
 
     // Calculate energy profile from audio data
@@ -444,13 +473,13 @@ fn refine_segments_with_audio_analysis(
     let look_back_seconds = 3.0; // Look back this many seconds from detected start time
 
     for (i, segment) in segments.iter().enumerate() {
-        if i == 0 || !segment.is_song {
+        if i == 0 || !segment.segment.is_song {
             // Keep the first segment and non-song segments as they are
             refined_segments.push(segment.clone());
             continue;
         }
 
-        let song_start = segment.start_time;
+        let song_start = segment.segment.start_time;
         let search_start = (song_start - look_back_seconds).max(0.0);
 
         // Find silence points within the look-back window
@@ -476,15 +505,19 @@ fn refine_segments_with_audio_analysis(
             );
 
             // Update the previous segment's end time if it exists and is a song
-            if i > 0 && refined_segments[i - 1].is_song {
-                refined_segments[i - 1].end_time = new_start;
+            if i > 0 && refined_segments[i - 1].segment.is_song {
+                refined_segments[i - 1].segment.end_time = new_start;
             }
 
             // Add refined segment
-            refined_segments.push(AudioSegment {
+            let segment_audio = AudioSegment {
                 start_time: new_start,
-                end_time: segment.end_time,
+                end_time: segment.segment.end_time,
                 is_song: true,
+            };
+            refined_segments.push(SongSegment {
+                song: segment.song.clone(),
+                segment: segment_audio,
             });
         } else {
             // No silence found in the look-back window, keep original
@@ -494,21 +527,18 @@ fn refine_segments_with_audio_analysis(
 
     // Ensure the last segment ends at the total duration
     if let Some(last) = refined_segments.last_mut() {
-        last.end_time = total_duration;
+        last.segment.end_time = total_duration;
     }
 
     Ok(refined_segments)
 }
 
-fn create_song_timestamps(
-    segments: &[AudioSegment],
-    song_list: &[Song],
-) -> Vec<SongTimestamp> {
+fn create_song_timestamps(segments: &[SongSegment], song_list: &[Song]) -> Vec<SongTimestamp> {
     let mut song_timestamps = Vec::new();
     let mut song_counter = 0;
 
     for segment in segments.iter() {
-        if !segment.is_song {
+        if !segment.segment.is_song {
             // Skip gaps
             continue;
         }
@@ -527,9 +557,9 @@ fn create_song_timestamps(
         // Add song to timestamps collection
         song_timestamps.push(SongTimestamp {
             title: song_title.to_string(),
-            start_time: segment.start_time,
-            end_time: segment.end_time,
-            duration: segment.end_time - segment.start_time,
+            start_time: segment.segment.start_time,
+            end_time: segment.segment.end_time,
+            duration: segment.segment.end_time - segment.segment.start_time,
         });
     }
 
@@ -538,7 +568,7 @@ fn create_song_timestamps(
 
 fn process_segments(
     input_file: &str,
-    segments: &[AudioSegment],
+    segments: &[SongSegment],
     concert: SetList,
     output_dir: &str,
     output_format: OutputFormat,
@@ -557,17 +587,17 @@ fn process_segments(
     let mut gap_counter = 0;
 
     for segment in segments.iter() {
-        if !segment.is_song {
+        if !segment.segment.is_song {
             // Optionally process gaps
             gap_counter += 1;
             // let output_file = format!("gap_{:02}.mp4", gap_counter);
 
             println!(
                 "ignoring gap {}: {:.2}s to {:.2}s",
-                gap_counter, segment.start_time, segment.end_time
+                gap_counter, segment.segment.start_time, segment.segment.end_time
             );
 
-            // extract_segment(input_file, &output_file, segment.start_time, segment.end_time, None, None, None)?;
+            // extract_segment(input_file, &output_file, segment.segment.start_time, segment.segment.end_time, None, None, None)?;
             continue;
         }
 
@@ -591,9 +621,9 @@ fn process_segments(
             &output_format,
             song_counter,
             song_title,
-            segment.start_time,
-            segment.end_time,
-            segment.end_time - segment.start_time
+            segment.segment.start_time,
+            segment.segment.end_time,
+            segment.segment.end_time - segment.segment.start_time
         );
 
         match output_format {
@@ -603,8 +633,8 @@ fn process_segments(
                 extract_segment(
                     input_file,
                     &output_file,
-                    segment.start_time,
-                    segment.end_time,
+                    segment.segment.start_time,
+                    segment.segment.end_time,
                     Some(song_title),
                     &concert.metadata,
                     Some(song_counter), // Add song number as track metadata
@@ -620,8 +650,8 @@ fn process_segments(
                 extract_audio_segment(
                     input_file,
                     &output_file,
-                    segment.start_time,
-                    segment.end_time,
+                    segment.segment.start_time,
+                    segment.segment.end_time,
                     Some(song_title),
                     &concert.metadata,
                     Some(song_counter), // Add song number as track metadata
@@ -653,7 +683,7 @@ fn detect_song_boundaries_from_text(
     artist: &str,
     songs: &[Song],
     video_info: &VideoInfo,
-) -> Result<Vec<AudioSegment>> {
+) -> Result<Vec<SongSegment>> {
     let total_duration = video_info.duration;
     let artist_cmp = artist.to_lowercase();
     // Create a temporary directory for frames
@@ -709,25 +739,27 @@ fn detect_song_boundaries_from_text(
     println!("Extracted {} frames, analyzing for text...", frames.len());
 
     // Map to store detected song start times
-    let mut song_start_times = Vec::new();
-    let mut song_title_matched: HashSet<String> = HashSet::new();
+    let mut song_title_matched: HashMap<String, f64> = HashMap::new();
 
     // Process each frame to detect text
     frames.sort_by(|a, b| {
         frame_number_from_image_filename(a).cmp(&frame_number_from_image_filename(b))
     });
+
+    let mut last_song_start_time: Option<f64> = None;
     for mut frame_path in frames {
         // Extract frame number to calculate timestamp
         let frame_num = frame_number_from_image_filename(&frame_path);
 
-        if song_start_times.len() > 0 {
-            if song_start_times.len() == songs.len() {
+        if song_title_matched.len() > 0 {
+            if song_title_matched.len() == songs.len() {
                 break;
             }
-            let (_, last_start_time) = song_start_times[song_start_times.len() - 1];
-            // A song must be at least 30 seconds
-            if (frame_num as f64) - last_start_time < 30.0 {
-                continue;
+            if let Some(last_start_time) = last_song_start_time {
+                // A song must be at least 30 seconds
+                if (frame_num as f64) - last_start_time < 30.0 {
+                    continue;
+                }
             }
         }
 
@@ -735,7 +767,7 @@ fn detect_song_boundaries_from_text(
             .iter()
             .filter(|song|
             // skip already matched songs
-            !song_title_matched.contains(&song.title))
+            !song_title_matched.contains_key(&song.title))
             .map(|song| &song.title)
             .cloned()
             .collect::<Vec<_>>();
@@ -782,9 +814,9 @@ fn detect_song_boundaries_from_text(
                         video_info,
                     )?;
 
-                    if let Some(time_match) = title_time {
-                        song_title_matched.insert(time_match.0.clone());
-                        song_start_times.push(time_match);
+                    if let Some((song, time)) = title_time {
+                        song_title_matched.insert(song, time);
+                        last_song_start_time = Some(time);
                         break 'convert; // Found a match, no need to try other PSM options
                     }
                 }
@@ -793,6 +825,7 @@ fn detect_song_boundaries_from_text(
     }
 
     // Sort song start times by timestamp
+    let mut song_start_times: Vec<(&String, &f64)> = song_title_matched.iter().collect();
     song_start_times.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
 
     // Create segments from detected song boundaries
@@ -814,19 +847,36 @@ fn detect_song_boundaries_from_text(
             // Always set the first song to start at 0 seconds
             0.0
         } else {
-            song_start_times[i].1
+            *song_start_times[i].1
         };
 
         let end_time = if i < song_start_times.len() - 1 {
-            song_start_times[i + 1].1
+            *song_start_times[i + 1].1
         } else {
             total_duration
         };
 
-        segments.push(AudioSegment {
+        // Find the corresponding song for this segment
+        let song_title = song_start_times[i].0;
+
+        // Find the matching song object from the input list
+        let song_obj = songs
+            .iter()
+            .find(|s| s.title.to_lowercase() == song_title.to_lowercase())
+            .cloned()
+            .unwrap_or(Song {
+                title: song_title.clone(),
+            });
+
+        let segment = AudioSegment {
             start_time,
             end_time,
             is_song: true,
+        };
+
+        segments.push(SongSegment {
+            song: song_obj,
+            segment,
         });
     }
 
