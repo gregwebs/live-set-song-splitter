@@ -1,6 +1,6 @@
+use std::fmt::{self};
 use std::fs::{self};
 use std::process::Command;
-use std::fmt::{self};
 
 use anyhow::{Context, Result};
 use stringmetrics::{levenshtein_weight, LevWeights};
@@ -184,9 +184,15 @@ pub enum MatchReason {
 impl fmt::Display for MatchReason {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            MatchReason::Contains => { write!(f, "contains") },
-            MatchReason::StartsWith => { write!(f, "starts_with") },
-            MatchReason::Levenshtein => { write!(f, "levenshtein") },
+            MatchReason::Contains => {
+                write!(f, "contains")
+            }
+            MatchReason::StartsWith => {
+                write!(f, "starts_with")
+            }
+            MatchReason::Levenshtein => {
+                write!(f, "levenshtein")
+            }
         }
     }
 }

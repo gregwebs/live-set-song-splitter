@@ -733,6 +733,9 @@ fn detect_song_boundaries_from_text(
         let frame_num = frame_number_from_image_filename(&frame_path);
 
         if song_start_times.len() > 0 {
+            if song_start_times.len() == songs.len() {
+                break;
+            }
             let (_, last_start_time) = song_start_times[song_start_times.len() - 1];
             // A song must be at least 30 seconds
             if (frame_num as f64) - last_start_time < 30.0 {
@@ -749,7 +752,7 @@ fn detect_song_boundaries_from_text(
             .cloned()
             .collect::<Vec<_>>();
 
-        for convert in [false, true] {
+        'convert: for convert in [false, true] {
             if convert {
                 let orig_path = frame_path.clone();
                 // let mut bw_path = frame_path.clone();
@@ -794,16 +797,10 @@ fn detect_song_boundaries_from_text(
                     if let Some(time_match) = title_time {
                         song_title_matched.insert(time_match.0.clone());
                         song_start_times.push(time_match);
-                        break; // Found a match, no need to try other PSM options
+                        break 'convert; // Found a match, no need to try other PSM options
                     }
                 }
             }
-            if song_start_times.len() == songs.len() {
-                break;
-            }
-        }
-        if song_start_times.len() == songs.len() {
-            break;
         }
     }
 
