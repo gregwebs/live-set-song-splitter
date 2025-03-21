@@ -70,6 +70,13 @@ struct Song {
     title: String,
 }
 
+#[derive(Clone, Debug)]
+struct AudioSegment {
+    pub start_time: f64,
+    pub end_time: f64,
+    pub is_song: bool,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct SetMetaData {
     artist: String,
@@ -181,7 +188,7 @@ fn main() -> Result<()> {
         }
         // Create segments from the timestamps
         for song in &timestamps_data.songs {
-            segments.push(audio::AudioSegment {
+            segments.push(AudioSegment {
                 start_time: song.start_time,
                 end_time: song.end_time,
                 is_song: true,
@@ -195,7 +202,7 @@ fn main() -> Result<()> {
     } else if let Some(timestamps) = &setlist.timestamps {
         // Create segments from the timestamps
         for song in timestamps {
-            segments.push(audio::AudioSegment {
+            segments.push(AudioSegment {
                 start_time: song.start_time,
                 end_time: song.end_time,
                 is_song: true,
@@ -245,25 +252,6 @@ fn main() -> Result<()> {
         // Create output directory for JSON file even if we don't save songs
         fs::create_dir_all(&output_dir)
             .with_context(|| format!("Failed to create output directory: {}", output_dir))?;
-
-        // Update the input setlist file with timestamps
-        let mut updated_setlist = setlist.clone();
-        updated_setlist.timestamps = Some(song_timestamps);
-        let json_content = serde_json::to_string_pretty(&updated_setlist)
-            .with_context(|| "Failed to serialize updated setlist to JSON")?;
-        let setlist_filename = std::path::Path::new(&setlist_path)
-            .file_name()
-            .ok_or_else(|| {
-                anyhow::anyhow!("Failed to extract filename from path: {}", setlist_path)
-            })?
-            .to_str()
-            .ok_or_else(|| {
-                anyhow::anyhow!("Failed to convert filename to string: {}", setlist_path)
-            })?;
-        let setlist_output = format!("{}/{}", &output_dir, &setlist_filename);
-        std::fs::write(&setlist_output, json_content)
-            .with_context(|| format!("Failed to write updated setlist to {}", &setlist_output))?;
-        println!("Song timestamps written back to {}", setlist_path);
     }
 
     for (i, segment) in segments.iter().enumerate() {
@@ -301,9 +289,9 @@ fn main() -> Result<()> {
 
 fn refine_last_song_end_time(
     input_file: &str,
-    segments: Vec<audio::AudioSegment>,
+    segments: Vec<AudioSegment>,
     total_duration: f64,
-) -> Result<Vec<audio::AudioSegment>> {
+) -> Result<Vec<AudioSegment>> {
     // Find the last song segment
     let mut refined_segments = segments;
     if let Some(last_idx) = refined_segments.iter().rposition(|seg| seg.is_song) {
@@ -418,10 +406,10 @@ fn find_black_frame_end_time(input_file: &str, total_duration: f64) -> Result<Op
 }
 
 fn refine_segments_with_audio_analysis(
-    segments: &[audio::AudioSegment],
+    segments: &[AudioSegment],
     audio_data: &[f32],
     total_duration: f64,
-) -> Result<Vec<audio::AudioSegment>> {
+) -> Result<Vec<AudioSegment>> {
     println!("Refining song boundaries using audio analysis...");
 
     // Calculate energy profile from audio data
@@ -493,7 +481,7 @@ fn refine_segments_with_audio_analysis(
             }
 
             // Add refined segment
-            refined_segments.push(audio::AudioSegment {
+            refined_segments.push(AudioSegment {
                 start_time: new_start,
                 end_time: segment.end_time,
                 is_song: true,
@@ -513,7 +501,7 @@ fn refine_segments_with_audio_analysis(
 }
 
 fn create_song_timestamps(
-    segments: &[audio::AudioSegment],
+    segments: &[AudioSegment],
     song_list: &[Song],
 ) -> Vec<SongTimestamp> {
     let mut song_timestamps = Vec::new();
@@ -550,7 +538,7 @@ fn create_song_timestamps(
 
 fn process_segments(
     input_file: &str,
-    segments: &[audio::AudioSegment],
+    segments: &[AudioSegment],
     concert: SetList,
     output_dir: &str,
     output_format: OutputFormat,
@@ -665,7 +653,7 @@ fn detect_song_boundaries_from_text(
     artist: &str,
     songs: &[Song],
     video_info: &VideoInfo,
-) -> Result<Vec<audio::AudioSegment>> {
+) -> Result<Vec<AudioSegment>> {
     let total_duration = video_info.duration;
     let artist_cmp = artist.to_lowercase();
     // Create a temporary directory for frames
@@ -835,7 +823,7 @@ fn detect_song_boundaries_from_text(
             total_duration
         };
 
-        segments.push(audio::AudioSegment {
+        segments.push(AudioSegment {
             start_time,
             end_time,
             is_song: true,

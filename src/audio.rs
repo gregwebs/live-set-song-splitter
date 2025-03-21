@@ -9,13 +9,6 @@ pub const HOP_SIZE: usize = 1024;
 pub const MIN_SILENCE_DURATION: f64 = 2.0; // Seconds of silence to detect a gap
 pub const ENERGY_THRESHOLD: f64 = 0.005; // Threshold for audio energy detection (lowered for better sensitivity)
 
-#[derive(Clone, Debug)]
-pub struct AudioSegment {
-    pub start_time: f64,
-    pub end_time: f64,
-    pub is_song: bool,
-}
-
 // const MAX_GAP_DURATION: f64 = 15.0; // Seconds - gaps longer than this are considered "talking" segments
 
 pub fn extract_audio_waveform(input_file: &str) -> Result<Vec<f32>> {
