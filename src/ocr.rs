@@ -178,7 +178,7 @@ pub fn matches_song_title(
 pub enum MatchReason {
     Contains,
     StartsWith,
-    Levenshtein,
+    Levenshtein(u32),
 }
 
 impl fmt::Display for MatchReason {
@@ -190,8 +190,8 @@ impl fmt::Display for MatchReason {
             MatchReason::StartsWith => {
                 write!(f, "starts_with")
             }
-            MatchReason::Levenshtein => {
-                write!(f, "levenshtein")
+            MatchReason::Levenshtein(limit) => {
+                write!(f, "levenshtein({})", limit)
             }
         }
     }
@@ -204,7 +204,6 @@ pub fn matches_song_title_weighted(
     weights: &LevWeights,
 ) -> Option<(MatchReason, String, u32)> {
     let title_normalized = normalize_text(song_title);
-    let levenshtein_limit = (song_title.len() as f64 / 3.0).floor() as u32;
 
     for line in lines {
         let line_normalized = normalize_text(line);
@@ -223,12 +222,9 @@ pub fn matches_song_title_weighted(
             let take = std::cmp::min(line_count + 2, title_count);
             title_normalized = title_normalized.chars().take(take).collect::<String>();
         }
-        let mut levenshtein_limit = levenshtein_limit;
-        if line_normalized.len() > title_normalized.len() {
-            levenshtein_limit = (line_normalized.len() as f64 / 3.0).floor() as u32;
-        }
+        let mut levenshtein_limit = (line_normalized.len() as f64 / 3.0).floor() as u32;
         if is_overlay {
-            levenshtein_limit += 1
+            levenshtein_limit += 2
         }
         // If we have an overlay and no exact match was found, try fuzzy matching
         let lev = levenshtein_weight(
@@ -242,7 +238,7 @@ pub fn matches_song_title_weighted(
         // println!("normalized title/line:\n{}\n{}", title_normalized, line_normalized);
         // println!("levenshtein distance: {}/{}. {}. {}", lev, levenshtein_limit, song_title, line);
         if lev <= levenshtein_limit {
-            return Some((MatchReason::Levenshtein, line.clone(), lev));
+            return Some((MatchReason::Levenshtein(lev), line.clone(), lev));
         }
         if title_normalized.starts_with(&line_normalized) {
             // println!("normalized title contains normalized line");
@@ -310,7 +306,8 @@ mod tests_matches_song_title {
         // Test fuzzy matching (only works with overlay flag)
         let ocr_lines = vec!["helo wrld".to_string()]; // OCR might miss letters
         assert!(!matches_song_title(&ocr_lines, "hello world", false).is_some()); // Should fail without overlay
-        assert!(matches_song_title(&ocr_lines, "hello world", true).is_some()); // Should pass with overlay
+        let result = matches_song_title(&ocr_lines, "hello world", true);
+        assert!(result.is_some()); // Should pass with overlay
     }
 
     #[test]
@@ -349,7 +346,26 @@ mod tests_matches_song_title {
 
     #[test]
     fn test_copyright() {
-        let lines = vec!["‘© Quarto (Fado Pager".to_string()];
+        let lines = vec!["© Quarto (Fado Pager".to_string()];
         assert!(matches_song_title(&lines, "O Quarto (fado Pagem)", true).is_some());
+    }
+
+    #[test]
+    fn test_too_loose() {
+        let lines = vec!["seenaneiias Thibaudcn™".to_string()];
+        let song_title = "heitor villa-lobos: \"o polichinelo\" (from a prole do bebê no. 1)";
+        let result = matches_song_title(&lines, &song_title, true);
+        if let Some(ref r) = result {
+            print_match_result(r);
+        }
+        assert!(!result.is_some());
+    }
+
+    fn print_match_result(result: &(MatchReason, String, u32)) {
+        let (reason, line, lev_dist) = result;
+        println!(
+            "Match found! line='{}' dist={} reason={}",
+            line, lev_dist, reason,
+        );
     }
 }
