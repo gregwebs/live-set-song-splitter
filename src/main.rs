@@ -63,6 +63,10 @@ struct Cli {
     /// Custom output directory for generated audio/video files
     #[arg(long)]
     output_dir: Option<String>,
+
+    /// Save successfully matched images to ./analysis/images directory
+    #[arg(long)]
+    analyze_images: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -234,6 +238,7 @@ fn main() -> Result<()> {
             &setlist.metadata.artist,
             &setlist.set_list,
             &video_info,
+            cli.analyze_images,
         )?;
         segments = song_segments;
         for segment in &segments {
@@ -683,6 +688,7 @@ fn detect_song_boundaries_from_text(
     artist: &str,
     songs: &[Song],
     video_info: &VideoInfo,
+    analyze_images: bool,
 ) -> Result<Vec<SongSegment>> {
     let total_duration = video_info.duration;
     let artist_cmp = artist.to_lowercase();
@@ -812,6 +818,7 @@ fn detect_song_boundaries_from_text(
                         &artist_cmp,
                         frame_num,
                         video_info,
+                        analyze_images,
                     )?;
 
                     if let Some((song, time)) = title_time {
@@ -896,6 +903,7 @@ fn match_song_titles(
     artist_cmp: &str,
     frame_num: usize,
     video_info: &VideoInfo,
+    analyze_images: bool,
 ) -> Result<Option<(String, f64)>> {
     let (lines, overlay) = ocr_parse;
 
@@ -943,6 +951,14 @@ fn match_song_titles(
                 "Match found! '{}' matches song '{}' frame={} dist={} reason={}",
                 line, &song_title, frame_num, lev_dist, reason,
             );
+
+            // If analyze_images flag is enabled, save the matched image
+            if analyze_images {
+                let frame_path =
+                    std::path::PathBuf::from(format!("{}/{}.png", temp_dir, frame_num));
+                save_matched_image(&frame_path, &song_title, frame_num, "initial")?;
+            }
+
             match timestamp_for_song(
                 input_file,
                 temp_dir,
@@ -950,6 +966,7 @@ fn match_song_titles(
                 &song_title,
                 frame_num,
                 video_info,
+                analyze_images,
             ) {
                 Ok(timestamp) => {
                     return Ok(Some((song_title.to_string(), timestamp)));
@@ -967,6 +984,7 @@ fn timestamp_for_song(
     song_title: &str,
     frame_num: usize,
     video_info: &VideoInfo,
+    analyze_images: bool,
 ) -> Result<f64> {
     // Extract additional frames around this timestamp for more accurate boundary detection
     let refined_timestamp = refine_song_start_time(
@@ -976,6 +994,7 @@ fn timestamp_for_song(
         song_title,
         frame_num,
         video_info,
+        analyze_images,
     )?;
 
     // Use the refined timestamp if available, otherwise use the original
@@ -994,6 +1013,7 @@ fn refine_song_start_time(
     song_title: &str,
     initial_frame_num: usize,
     video_info: &VideoInfo,
+    analyze_images: bool,
 ) -> Result<f64> {
     let initial_timestamp = initial_frame_num as f64;
     println!(
@@ -1117,13 +1137,18 @@ fn refine_song_start_time(
                     let (lines, overlay) = parsed;
                     // If we see the artist overlay that's good enough.
                     // On the initial fade in we might be able to see the artist name but not the song title.
-                    if overlay
+                    let matched = overlay
                         || matches_song_title_weighted(&lines, song_title, overlay, &weights)
-                            .is_some()
-                    {
+                            .is_some();
+                    if matched {
                         if earliest_match.is_none() || frame_num < earliest_match.unwrap() {
                             earliest_match = Some(frame_num);
                             earliest_match_found = true;
+
+                            // If analyze_images flag is enabled, save the matched image
+                            if analyze_images {
+                                save_matched_image(&frame_path, song_title, frame_num, "refined")?;
+                            }
                         }
                     }
                 }
@@ -1296,6 +1321,37 @@ fn extract_audio_segment(
             output_file
         ));
     }
+
+    Ok(())
+}
+
+/// Save a matched image to the analysis directory
+fn save_matched_image(
+    frame_path: &std::path::PathBuf,
+    song_title: &str,
+    frame_num: usize,
+    prefix: &str,
+) -> Result<()> {
+    // Create analysis directory if it doesn't exist
+    let analysis_dir = "analysis/images";
+    fs::create_dir_all(analysis_dir)
+        .with_context(|| format!("Failed to create analysis directory: {}", analysis_dir))?;
+
+    // Create a sanitized filename from the song title
+    let safe_title = sanitize_filename(song_title);
+    let target_path = format!(
+        "{}/{}_{}_{}.png",
+        analysis_dir, prefix, safe_title, frame_num
+    );
+
+    // Copy the image file to the analysis directory
+    fs::copy(frame_path, &target_path).with_context(|| {
+        format!(
+            "Failed to copy matched image from {} to {}",
+            frame_path.display(),
+            target_path
+        )
+    })?;
 
     Ok(())
 }
