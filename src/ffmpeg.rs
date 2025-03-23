@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::process::Command;
 
 use anyhow::Result;
@@ -6,11 +7,57 @@ use anyhow::Result;
 // pub const BLACK_AND_WHITE: &str = "hue=s=0";
 pub const BLACK_AND_WHITE: &str = "format=gray,maskfun=low=128:high=128:fill=0:sum=128";
 
-pub fn create_ffmpeg_command() -> Command {
+#[derive(Debug)]
+pub struct Ffmpeg {
+    cmd: Command,
+}
+
+impl Ffmpeg {
+    pub fn cmd(self) -> Command {
+        self.cmd
+    }
+
+    pub fn arg(&mut self, arg: &str) -> &mut Ffmpeg {
+        self.cmd.arg(arg);
+        self
+    }
+
+    pub fn args<Iter, Str>(&mut self, args: Iter) -> &mut Ffmpeg
+    where
+        Iter: IntoIterator<Item = Str>,
+        Str: AsRef<OsStr>,
+    {
+        self.cmd.args(args);
+        return self;
+    }
+
+    pub fn video_filter(&mut self, file: &str, filters: Vec<&str>) -> &mut Ffmpeg {
+        self.cmd.arg("-vf");
+        self.cmd.arg(filters.join(","));
+        self.cmd.arg(file);
+        self
+    }
+
+    pub fn from_to(&mut self, start_time: f64, end_time: f64) -> &mut Ffmpeg {
+        self.args(vec![
+            "-ss",
+            &format!("{:.3}", start_time),
+            "-to",
+            &format!("{:.3}", end_time),
+        ])
+    }
+
+    pub fn png(&mut self) -> &mut Ffmpeg {
+        self.arg("-c:v");
+        self.arg("png")
+    }
+}
+
+pub fn create_ffmpeg_command() -> Ffmpeg {
     let mut cmd = Command::new("ffmpeg");
     cmd.args(&["-hide_banner", "-loglevel", "warning"]);
     cmd.stdout(std::process::Stdio::null());
-    cmd
+    Ffmpeg { cmd: cmd }
 }
 
 pub fn create_ffprobe_command() -> Command {

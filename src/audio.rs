@@ -17,6 +17,7 @@ pub fn extract_audio_waveform(input_file: &str) -> Result<Vec<f32>> {
 
     // Extract audio to WAV using FFmpeg
     let status = create_ffmpeg_command()
+        .cmd()
         .args(&[
             "-i",
             input_file,

@@ -359,24 +359,20 @@ fn find_black_frame_end_time(input_file: &str, total_duration: f64) -> Result<Op
     overwrite_dir(temp_dir)?;
 
     // Extract frames at full framerate for the last 40 seconds
-    let status = ffmpeg::create_ffmpeg_command()
+    let mut ffmpeg = ffmpeg::create_ffmpeg_command();
+    ffmpeg
+        .from_to(search_start, total_duration)
+        .args(&["-i", input_file])
+        .png()
         .args(&[
-            "-ss",
-            &format!("{}", search_start),
-            "-to",
-            &format!("{}", total_duration),
-            "-i",
-            input_file,
-            "-c:v",
-            "png",
             "-frame_pts",
             "1",
             "-fps_mode",
             "passthrough", // Use original timestamps
-            "-vf",
-            "scale=200:100",
-            &format!("{}/%d.png", temp_dir),
         ])
+        .video_filter(&format!("{}/%d.png", temp_dir), vec!["scale=200:100"]);
+    let status = ffmpeg
+        .cmd()
         // TODO: can we get rid of this particular error without just silencing stderr?
         // [image2 @ 0x132e08570] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 928 >= 928
         .stderr(std::process::Stdio::null())
@@ -711,23 +707,21 @@ fn detect_song_boundaries_from_text(
     let every_few_seconds = "fps=1,select='not(mod(t,1))'";
 
     // Extract frames every 1 seconds with potential text overlays
-    let status = ffmpeg::create_ffmpeg_command()
-        .args(&[
-            "-i",
-            input_file,
-            "-c:v",
-            "png",
-            "-frame_pts",
-            "1",
-            "-fps_mode",
-            "passthrough", // Use original timestamps (replaces -vsync 0)
-            "-qscale:v",
-            "31", // Quality setting
-            "-vf",
-            &format!("{},{}", every_few_seconds, CROP_TO_TEXT), // Extract 1 frame every few seconds, focus on the text area
-            &format!("{}/%d.png", temp_dir),                    // Use sequential numbering
-        ])
-        .status()?;
+    let mut ffmpeg = ffmpeg::create_ffmpeg_command();
+    ffmpeg.args(&[
+        "-i",
+        input_file,
+        "-c:v",
+        "png",
+        "-frame_pts",
+        "1",
+        "-fps_mode",
+        "passthrough", // Use original timestamps (replaces -vsync 0)
+        "-vf",
+        &format!("{},{}", every_few_seconds, CROP_TO_TEXT), // Extract 1 frame every few seconds, focus on the text area
+        &format!("{}/%d.png", temp_dir),                    // Use sequential numbering
+    ]);
+    let status = ffmpeg.cmd().status()?;
 
     println!("Frames extracted successfully for image detection.");
 
@@ -1057,23 +1051,24 @@ fn refine_song_start_time(
 
     // Extract frames at original video framerate for accuracy
     let fps = video_info.framerate;
-    let status = ffmpeg::create_ffmpeg_command()
-        .args(&[
-            "-ss",
-            &format!("{}", start_time),
-            "-to",
-            &format!("{}", end_timestamp),
-            "-i",
-            input_file,
-            "-c:v",
-            "png",
-            "-vf",
-            &format!("fps={},{},{}", fps, CROP_TO_TEXT, ffmpeg::BLACK_AND_WHITE), // Use original video framerate
-            "-qscale:v",
-            "31",                               // Quality setting
+    let mut ffmpeg = ffmpeg::create_ffmpeg_command();
+    ffmpeg
+        .from_to(start_time, end_timestamp)
+        .args(&["-i", input_file])
+        .png()
+        .video_filter(
             &format!("{}/%d.png", refined_dir), // Sequential numbering starting from 1
-        ])
-        .status()?;
+            vec![&format!("fps={}", fps), CROP_TO_TEXT], // Use original video framerate
+        )
+        .video_filter(
+            &format!("{}/%dbw.png", refined_dir), // Sequential numbering starting from 1
+            vec![
+                &format!("fps={}", fps), // Use original video framerate
+                CROP_TO_TEXT,
+                ffmpeg::BLACK_AND_WHITE,
+            ],
+        );
+    let status = ffmpeg.cmd().status()?;
 
     if !status.success() {
         return Err(anyhow::anyhow!("Failed to extract refined frames"));
@@ -1246,18 +1241,11 @@ fn extract_segment(
     concertdata: &SetMetaData,
     track_number: Option<usize>,
 ) -> Result<()> {
-    let mut cmd = ffmpeg::create_ffmpeg_command();
-
-    cmd.args(&[
-        "-i",
-        input_file,
-        "-c",
-        "copy",
-        "-ss",
-        &format!("{:.3}", start_time),
-        "-to",
-        &format!("{:.3}", end_time),
-    ]);
+    let mut ffmpeg = ffmpeg::create_ffmpeg_command();
+    ffmpeg
+        .args(&["-i", input_file, "-c", "copy"])
+        .from_to(start_time, end_time);
+    let mut cmd = ffmpeg.cmd();
 
     // Add metadata
     add_metadata_to_cmd(&mut cmd, song_title, concertdata, track_number);
@@ -1289,21 +1277,15 @@ fn extract_audio_segment(
     concertdata: &SetMetaData,
     track_number: Option<usize>,
 ) -> Result<()> {
-    let mut cmd = ffmpeg::create_ffmpeg_command();
-
-    cmd.args(&[
-        "-i",
-        input_file,
-        "-vn", // No video
-        "-acodec",
-        "copy", // Copy audio stream without re-encoding
-        "-map",
-        "0:a",
-        "-ss",
-        &format!("{:.3}", start_time),
-        "-to",
-        &format!("{:.3}", end_time),
-    ]);
+    let mut ffmpeg = ffmpeg::create_ffmpeg_command();
+    ffmpeg
+        .args(&[
+            "-i", input_file, "-vn", // No video
+            "-acodec", "copy", // Copy audio stream without re-encoding
+            "-map", "0:a",
+        ])
+        .from_to(start_time, end_time);
+    let mut cmd = ffmpeg.cmd();
 
     // Add metadata
     add_metadata_to_cmd(&mut cmd, song_title, concertdata, track_number);
