@@ -117,7 +117,6 @@ impl SetMetaData {
 struct SetList {
     #[serde(flatten)]
     metadata: SetMetaData,
-    #[serde(rename = "setList")]
     set_list: Vec<Song>,
     timestamps: Option<Vec<SongTimestamp>>,
 }
@@ -1046,7 +1045,7 @@ fn refine_song_start_time(
     );
 
     // Create a subdirectory for the refined frames
-    let refined_dir = format!("{}/refined_{}", temp_dir, song_title.replace(" ", "_"));
+    let refined_dir = format!("{}/refined_{}", temp_dir, sanitize_filename(song_title));
     overwrite_dir(&refined_dir)?;
 
     // Extract frames at original video framerate for accuracy

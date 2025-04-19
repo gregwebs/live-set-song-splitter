@@ -20,3 +20,8 @@ Where:
 ## How it works
 
 It looks for the text overlay with the artist and song title in the video frames.
+
+
+## Bad data
+
+This concert is missing the overlays: Carminho

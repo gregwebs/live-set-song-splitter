@@ -22,7 +22,7 @@ pub fn sanitize_filename(input: &str) -> String {
     let mut sanitized = input.replace(
         &['/', '\\', ':', '*', '?', '"', '<', '>', '|', '\0'][..],
         "_",
-    );
+    ).replace("__", "_");
 
     // Trim leading/trailing whitespace and dots
     sanitized = sanitized.trim().trim_matches('.').to_string();
